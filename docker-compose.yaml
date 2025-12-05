@@ -1,0 +1,67 @@
+services:
+  twitch-gpu-streamer:
+    # --- To build the image locally (default) ---
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: twitch-gpu-streamer
+    # --- To use an image from Docker Hub ---
+    # Comment out the 'build' section above and uncomment the line below.
+    # image: e6on/twitch-gpu-streamer:latest
+    container_name: twitch-gpu-streamer
+    restart: always
+    # --- GPU Device Mapping (for Hardware Acceleration) ---
+    # The /dev/dri device mapping is for Intel and AMD GPUs using VA-API.
+    # This section is only needed if ENABLE_HW_ACCEL is set to "true".
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/card0:/dev/dri/card0
+    volumes:
+      - ./videos:/videos:ro
+      - ./music:/music:ro
+      - ./data:/data
+    environment:
+      - DEBUG=true
+      # TWITCH_STREAM_KEY is loaded automatically from the .env file.
+      # This line tells compose to pass the variable from the host environment into the container.
+      - TWITCH_STREAM_KEY
+      - VIDEO_DIR=/videos
+      - VIDEO_FILE_TYPES="mp4"
+      # --- Optional Stream Quality Settings ---
+      - ENABLE_HW_ACCEL=true
+      - VAAPI_DEVICE=/dev/dri/card0
+      # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
+      - STREAM_RESOLUTION=1280x720
+      - STREAM_FRAMERATE=30
+      - VIDEO_BITRATE=2500k
+      - AUDIO_BITRATE=64k
+      # --- Enable Video/Music Shuffle Mode ---
+      - ENABLE_SHUFFLE=true
+      # --- Enable Video Looping ---
+      - ENABLE_LOOP=true
+      # --- Optional Background Music ---
+      # Uncomment to enable a separate, continuously looping music track over your videos.
+      - ENABLE_MUSIC=true
+      - MUSIC_DIR=/music
+      - MUSIC_VOLUME=0.25 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
+      - MUSIC_FILE_TYPES="mp3"
+      # --- Optional FFmpeg File Logging ---
+      # The main container log is always clean. Uncomment the line below to also save
+      # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
+      # This is useful for troubleshooting but can create large log files.
+      - ENABLE_FFMPEG_LOG_FILE=true
+      # --- Optional Script Event Logging ---
+      # Uncomment to save WARNING and ERROR level script messages to a log file.
+      # This is useful for reviewing issues without having to parse the main container log.
+      - ENABLE_SCRIPT_LOG_FILE=true
+      # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
+      # --- Optional Ingest Server ---
+      # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
+      - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
+      - TZ=Europe/Tallinn
+    # --- Group Permissions (for Hardware Acceleration) ---
+    # Grant the container user access to the host's render/video groups for VA-API.
+    # This is only needed if ENABLE_HW_ACCEL is set to "true".
+    group_add:
+      - "105" # GID for the 'render' group
+      - "44"  # GID for the 'video' group
