@@ -21,7 +21,6 @@ services:
       - ./music:/music:ro
       - ./data:/data
     environment:
-      - DEBUG=true
       # TWITCH_STREAM_KEY is loaded automatically from the .env file.
       # This line tells compose to pass the variable from the host environment into the container.
       - TWITCH_STREAM_KEY
@@ -29,7 +28,7 @@ services:
       - VIDEO_FILE_TYPES="mp4"
       # --- Optional Stream Quality Settings ---
       - ENABLE_HW_ACCEL=true
-      - VAAPI_DEVICE=/dev/dri/card0
+      - VAAPI_DEVICE=/dev/dri/renderD128
       # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
       - STREAM_RESOLUTION=1280x720
       - STREAM_FRAMERATE=30
@@ -39,6 +38,8 @@ services:
       - ENABLE_SHUFFLE=true
       # --- Enable Video Looping ---
       - ENABLE_LOOP=true
+      # Show per-file progress percentage updates
+      - ENABLE_PROGRESS_UPDATES=true
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true
@@ -49,7 +50,8 @@ services:
       # The main container log is always clean. Uncomment the line below to also save
       # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
       # This is useful for troubleshooting but can create large log files.
-      - ENABLE_FFMPEG_LOG_FILE=true
+      #- ENABLE_FFMPEG_LOG_FILE=true
+      #- FFMPEG_LOG_LEVEL=debug
       # --- Optional Script Event Logging ---
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.
