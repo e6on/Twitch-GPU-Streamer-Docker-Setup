@@ -7,8 +7,10 @@ FROM debian:bookworm-slim AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends xz-utils
 
 # Copy and extract the ffmpeg archive
-COPY ffmpeg-master-latest-linux64-gpl.tar.xz /tmp/
-RUN tar -xf /tmp/ffmpeg-master-latest-linux64-gpl.tar.xz -C /usr/local --strip-components=1
+#COPY ffmpeg-master-latest-linux64-gpl.tar.xz /tmp/
+#RUN tar -xf /tmp/ffmpeg-master-latest-linux64-gpl.tar.xz -C /usr/local --strip-components=1
+COPY ffmpeg-6.1.2-linux-amd64.tar.xz /tmp/
+RUN tar -xf /tmp/ffmpeg-6.1.2-linux-amd64.tar.xz -C /usr/local --strip-components=1
 
 # --- Final Stage ---
 # This is the final, optimized image that will be used.

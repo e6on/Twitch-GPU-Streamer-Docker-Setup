@@ -28,6 +28,7 @@ VIDEO_PLAYLIST="${VIDEO_PLAYLIST:-$LOG_DIR/video_list.txt}"
 # Optional background music playlist (concat format)
 MUSIC_DIR="${MUSIC_DIR:-/music}"
 MUSIC_LIST="${MUSIC_LIST:-$LOG_DIR/music_list.txt}"
+CONCAT_MUSIC_FILE="${LOG_DIR:-/data}/music.m4a"
 ENABLE_MUSIC="${ENABLE_MUSIC:-false}"
 MUSIC_VOLUME="${MUSIC_VOLUME:-0.25}"
 MUSIC_FILE_TYPES="${MUSIC_FILE_TYPES:-mp3 flac wav ogg}"
@@ -81,10 +82,12 @@ fi
 
 # Create a scaled filter for the chosen encoder
 if [[ "$USE_HWACCEL" == "true" ]]; then
-    VIDEO_FILTER="scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12"
+    VIDEO_FILTER="scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12" # VAAPI scaling
 else
-    VIDEO_FILTER="scale=${STREAM_RESOLUTION%x*}:${STREAM_RESOLUTION#*x}:flags=lanczos"
+    VIDEO_FILTER="scale=${STREAM_RESOLUTION%x*}:${STREAM_RESOLUTION#*x}:flags=lanczos" # Software scaling
 fi
+# Decide if a video filter should be used. For now, this is always true if a filter is defined.
+USE_VIDEO_FILTER="${USE_VIDEO_FILTER:-true}"
 
 # --- Logging Setup ---
 
@@ -262,13 +265,23 @@ generate_musiclist() {
     if [[ $count -eq 0 ]]; then
         log "WAR" "Found no music files under $MUSIC_DIR - disabling music."
         ENABLE_MUSIC="false"
-        rm -f "$MUSIC_LIST"
+        rm -f "$MUSIC_LIST" "$CONCAT_MUSIC_FILE"
     else
         # Log music playlist duration
         local duration_info
         duration_info=$(get_playlist_duration "$MUSIC_LIST")
         local formatted_duration=$(format_duration "$(echo "$duration_info" | cut -d' ' -f1)")
         log "WAR" "Music playlist duration: ${formatted_duration} - $(echo "$duration_info" | cut -d' ' -f2) files"
+
+        # Concatenate music files into a single file for stable looping
+        log "MUS" "Concatenating music files into a single track for looping..."
+        if ffmpeg -y -f concat -safe 0 -i "$MUSIC_LIST" -c copy "$CONCAT_MUSIC_FILE" >/dev/null 2>&1; then
+            log "MUS" "Successfully created concatenated music file at ${CONCAT_MUSIC_FILE}"
+        else
+            log "ERR" "Failed to concatenate music files. Disabling music for this session."
+            ENABLE_MUSIC="false"
+            rm -f "$CONCAT_MUSIC_FILE"
+        fi
     fi
 }
 
@@ -348,16 +361,43 @@ start_ffmpeg_stream() {
     cmd+=(-re -f concat -safe 0 -i "$1") # Use the playlist path passed as an argument
 
     # --- Music and Filter Configuration ---
-    if [[ "$ENABLE_MUSIC" == "true" && -f "$MUSIC_LIST" ]]; then
-        log "MUS" "Music is enabled. Adding music input and filter."
-        cmd+=(-stream_loop -1 -f concat -safe 0 -i "$MUSIC_LIST")
-        cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]")
-        cmd+=(-map "[vout]" -map "[aud]")
+    local -a audio_codec_opts
+    if [[ "$ENABLE_MUSIC" == "true" && -f "$CONCAT_MUSIC_FILE" ]]; then
+        log "MUS" "Music enabled, replacing original video audio. Video filter: ${USE_VIDEO_FILTER}"
+        cmd+=(-stream_loop -1 -i "$CONCAT_MUSIC_FILE")
+
+        # Determine if audio needs re-encoding based on volume
+        if [[ $(awk -v vol="$MUSIC_VOLUME" 'BEGIN { print (vol == 1.0) }') -eq 1 ]]; then
+            log "MUS" "Music volume is 1.0, copying audio stream directly (-c:a copy)."
+            audio_codec_opts=(-c:a copy)
+            if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
+                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")
+                cmd+=(-map "[vout]" -map "1:a")
+            else
+                cmd+=(-map 0:v -map "1:a")
+            fi
+        else
+            log "MUS" "Applying music volume (${MUSIC_VOLUME}). Audio will be re-encoded."
+            audio_codec_opts=(-c:a aac -ar 44100 -b:a "${AUDIO_BITRATE}")
+            if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
+                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]")
+                cmd+=(-map "[vout]" -map "[aud]")
+            else
+                cmd+=(-filter_complex "[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]")
+                cmd+=(-map 0:v -map "[aud]")
+            fi
+        fi
         cmd+=(-shortest) # End stream when the video playlist finishes
     else
-        log "VID" "Music is disabled. Using video audio directly."
-        cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")
-        cmd+=(-map "[vout]" -map "0:a")
+        log "VID" "Music is disabled. Using video audio directly. Video filter: ${USE_VIDEO_FILTER}"
+        log "VID" "Copying audio stream without re-encoding (-c:a copy)."
+        audio_codec_opts=(-c:a copy)
+        if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
+            cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")
+            cmd+=(-map "[vout]" -map "0:a")
+        else
+            cmd+=(-map 0:v -map "0:a")
+        fi
     fi
 
     # --- Codec Configuration ---
@@ -366,10 +406,10 @@ start_ffmpeg_stream() {
     else
         cmd+=(-c:v libx264 -preset veryfast -r "${STREAM_FRAMERATE}" -fps_mode cfr -minrate "${VIDEO_BITRATE}" -maxrate "${VIDEO_BITRATE}" -bufsize "${BUFSIZE}" -g "${GOP_SIZE}" -keyint_min "${GOP_SIZE}")
     fi
-    cmd+=(-c:a aac -ar 44100 -b:a "${AUDIO_BITRATE}")
+    cmd+=("${audio_codec_opts[@]}")
 
     # --- Output Configuration ---
-    cmd+=(-f flv "$TWITCH_URL/$STREAM_KEY")
+    cmd+=(-max_muxing_queue_size 4096 -muxdelay 0 -muxpreload 0  -rw_timeout 15000000 -flvflags no_duration_filesize -rtmp_live live -f flv "$TWITCH_URL/$STREAM_KEY")
 
     # --- Progress Monitoring Check ---
     if ! command -v progress &> /dev/null; then
@@ -385,7 +425,7 @@ start_ffmpeg_stream() {
         # Run ffmpeg in the background to get its PID, redirecting logs to a file.
         "${cmd[@]}" >> "$FFMPEG_LOG_FILE" 2>&1
     else
-        cmd+=(-loglevel error)
+        cmd+=(-loglevel warning)
         log "VID" "Executing FFmpeg command: ${cmd[*]}"
         # Run ffmpeg in the background, allowing its errors to print to the console.
         "${cmd[@]}" &

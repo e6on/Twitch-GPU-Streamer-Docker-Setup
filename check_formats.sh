@@ -23,7 +23,7 @@ VIDEO_EXTENSIONS="mp4 mkv mov avi webm ts"
 # --- Script Logic ---
 
 ROOT_ONLY=false
-if [[ "$1" == "--root-only" ]]; then
+if [[ "${1-}" == "--root-only" ]]; then
     ROOT_ONLY=true
     shift # Remove the flag from the arguments list
 fi
@@ -73,12 +73,12 @@ trap 'rm -f "$TMP_FILE_FPS"' EXIT
 
 find "${find_args[@]}" -print0 | while IFS= read -r -d '' file; do
     # Use a single ffprobe call for efficiency
-    info=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,pix_fmt -of default=noprint_wrappers=1:nokey=1 "$file")
+    info=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt,r_frame_rate -of default=noprint_wrappers=1:nokey=1 "$file")
     
     # Read info into variables
     res=$(echo "$info" | sed -n '1p' | tr -d '\n')x$(echo "$info" | sed -n '2p' | tr -d '\n')
-    fps=$(echo "$info" | sed -n '3p' | tr -d '\n')
-    pix_fmt=$(echo "$info" | sed -n '4p' | tr -d '\n')
+    pix_fmt=$(echo "$info" | sed -n '3p' | tr -d '\n') # Pixel format is now expected on line 3
+    fps=$(echo "$info" | sed -n '4p' | tr -d '\n')     # Frame rate is now expected on line 4
 
     echo "File: ${file} -> Res: ${res:-'N/A'}, FPS: ${fps:-'N/A'}, Format: ${pix_fmt:-'N/A'}"
     [ -n "$pix_fmt" ] && echo "$pix_fmt" >> "$TMP_FILE"

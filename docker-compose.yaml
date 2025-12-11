@@ -29,7 +29,8 @@ services:
       # --- Optional Stream Quality Settings ---
       - ENABLE_HW_ACCEL=true
       - VAAPI_DEVICE=/dev/dri/renderD128
-      # Uncomment and adjust these to change stream quality. Defaults are for a 960x540 30fps stream.
+      # Uncomment and adjust these to change stream quality.
+      - USE_VIDEO_FILTER=false
       - STREAM_RESOLUTION=1280x720
       - STREAM_FRAMERATE=30
       - VIDEO_BITRATE=2500k
@@ -39,13 +40,13 @@ services:
       # --- Enable Video Looping ---
       - ENABLE_LOOP=true
       # Show per-file progress percentage updates
-      - ENABLE_PROGRESS_UPDATES=true
+      #- ENABLE_PROGRESS_UPDATES=true
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true
       - MUSIC_DIR=/music
-      - MUSIC_VOLUME=0.25 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
-      - MUSIC_FILE_TYPES="mp3"
+      - MUSIC_VOLUME=1.0 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
+      - MUSIC_FILE_TYPES="m4a"
       # --- Optional FFmpeg File Logging ---
       # The main container log is always clean. Uncomment the line below to also save
       # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
