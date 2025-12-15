@@ -30,14 +30,14 @@ MUSIC_DIR="${MUSIC_DIR:-/music}"
 MUSIC_LIST="${MUSIC_LIST:-$LOG_DIR/music_list.txt}"
 CONCAT_MUSIC_FILE="${LOG_DIR:-/data}/music.m4a"
 ENABLE_MUSIC="${ENABLE_MUSIC:-false}"
-MUSIC_VOLUME="${MUSIC_VOLUME:-0.25}"
+MUSIC_VOLUME="${MUSIC_VOLUME:-1.0}"
 MUSIC_FILE_TYPES="${MUSIC_FILE_TYPES:-mp3 flac wav ogg}"
 
 # Streaming resolution & bitrates
 STREAM_RESOLUTION="${STREAM_RESOLUTION:-1280x720}"
 STREAM_FRAMERATE="${STREAM_FRAMERATE:-30}"
 VIDEO_BITRATE="${VIDEO_BITRATE:-2500k}"
-AUDIO_BITRATE="${AUDIO_BITRATE:-128k}"
+AUDIO_BITRATE="${AUDIO_BITRATE:-64k}"
 
 # Calculate GOP size for a 2-second keyframe interval, as recommended by Twitch.
 GOP_SIZE=$((STREAM_FRAMERATE * 2))
@@ -61,8 +61,8 @@ ENABLE_PROGRESS_UPDATES="${ENABLE_PROGRESS_UPDATES:-false}"
 
 # FFmpeg resilience/options and basic flags
 FFMPEG_OPTS=(
-    -fflags "+discardcorrupt+genpts"   # Drop corrupted frames and generate missing PTS if needed
-    -err_detect ignore_err             # Ignore decoding errors
+    -avoid_negative_ts make_zero     # Shift negative timestamps to start at 0, required for FLV.
+    -fflags "+discardcorrupt+genpts" # Drop corrupted frames and generate missing PTS if needed.
 )
 
 # VA-API options only used if enabled and device exists
@@ -71,9 +71,9 @@ VAAPI_OPTS=()
 # Decide whether to use VA-API or software encoding
 if [[ "$ENABLE_HW_ACCEL" == "true" && -e "$VAAPI_DEVICE" ]]; then
     VAAPI_OPTS=(
-        -hwaccel vaapi
-        -vaapi_device "$VAAPI_DEVICE"
-        -hwaccel_output_format vaapi
+        -hwaccel vaapi                  # Uses the VAAPI (Video Acceleration API) hardware acceleration for decoding the input video.
+        -vaapi_device "$VAAPI_DEVICE"   # Specifies the VAAPI device to use.
+        -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder to VAAPI.
     )
     USE_HWACCEL=true
 else
@@ -307,47 +307,76 @@ generate_videolist() {
 }
 
 # Function to monitor ffmpeg using the 'progress' command in the background
-monitor_with_progress() {
-    local ffmpeg_pid="$1"
-    local last_logged_file=""
+monitor_ffmpeg_progress() {
+  local last_logged_file=""
+  # Persist last file even if we are killed (TERM/INT) or exit normally.
+  persist_last_played() {
+    if [[ -n "$last_logged_file" ]]; then
+      echo "$last_logged_file" > "${LOG_DIR}/last_played.txt"
+    fi
+    # Print a final newline when monitoring stops
+    >&2 echo
+  }
+  trap persist_last_played EXIT TERM INT
 
-    # Give ffmpeg a moment to start and open a file before we start monitoring
+  # Give ffmpeg a moment to start and open a file before we start monitoring
+  sleep 3
+
+  #log "VID" "Progress check 1"
+
+  while pidof -x ffmpeg >/dev/null 2>&1; do
+    # Take a snapshot; don't let a transient error kill the loop
+    local output
+    output="$(progress -c ffmpeg -q 2>/dev/null || true)"
+    if [[ -z "$output" ]]; then
+      sleep 1
+      continue
+    fi
+    #log "VID" "Progress check 2 output: ${output}"
+
+    # Filter out the concatenated music file; allow 'no difference'
+    local filtered_output
+    filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
+    #log "VID" "Progress filtered_output: ${filtered_output}"
+
+    # --- Sanitize VIDEO_FILE_TYPES and build alternation regex ---
+    local sanitized_types="${VIDEO_FILE_TYPES%\"}"
+    sanitized_types="${sanitized_types#\"}"
+    sanitized_types="${sanitized_types%\'}"
+    sanitized_types="${sanitized_types#\'}"
+    local file_ext_regex
+    file_ext_regex="$(printf '%s\n' $sanitized_types | paste -sd'|' -)"
+    #log "VID" "File extension regex: ${file_ext_regex}"
+
+    # Extract filename (best-effort)
+    local current_file
+    current_file="$(echo "$filtered_output" \
+      | grep -Eo "(/|\.\/)?[^[:space:]]+\.(${file_ext_regex})" \
+      | head -n 1 || true)"
+    #log "VID" "Current file: ${current_file}"
+
+    # Extract percent (best-effort)
+    local progress_percent
+    progress_percent="$(echo "$output" \
+      | grep -Eo '^[[:space:]]*[0-9]+(\.[0-9]+)?%' \
+      | head -n 1 || true)"
+    #log "VID" "Progress percent: ${progress_percent}"
+
+    if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
+      [[ -n "$last_logged_file" ]] && >&2 echo
+      log "VID" "Now Playing: $(basename "$current_file") (${progress_percent:-0.0%})"
+      last_logged_file="$current_file"
+    elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
+      log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
+    fi
+
     sleep 2
+  done
 
-    # Monitor the ffmpeg process in a loop.
-    # The loop will exit when the 'progress' command can no longer find the PID.
-    while true; do
-        # Run 'progress' once and capture its output. '-W 1' prevents a long wait.
-        # Use '-q' for quiet mode to get just the data lines.
-        local output=""
-        output=$(progress -p "$ffmpeg_pid" -W 1 -q 2>/dev/null || break)
-        
-        # If output is empty, ffmpeg might be done or stalled, so we continue the loop.
-        if [[ -z "$output" ]]; then
-            sleep 2
-            continue
-        fi
-
-        #log "VID" "Progress output: $output"
-        
-        # Extract filename and percentage from the multi-line output of 'progress'
-        local current_file
-        # Match either an absolute path or a relative path to capture the filename correctly.
-        current_file=$(echo "$output" | grep -oP '(/|\.\./|\./)?\S+\.(mp4|mkv|mov|avi|webm|flv)' | head -n 1)
-        local progress_percent
-        progress_percent=$(echo "$output" | grep -oP '^\s*\K\d+(\.\d+)?%' | head -n 1)
-        
-        if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
-            # If we were showing progress for a previous file, print a newline first.
-            [[ -n "$last_logged_file" ]] && >&2 echo
-            log "VID" "Now Playing: $(basename "$current_file") (${progress_percent:-0.0%})"
-            last_logged_file="$current_file"
-        elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
-            log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
-        fi
-        sleep 2 # Check every 2 seconds
-    done
-    >&2 echo # Print a final newline when monitoring stops
+  if [[ -n "$last_logged_file" ]]; then
+    echo "$last_logged_file" > "${LOG_DIR}/last_played.txt"
+  fi
+  >&2 echo
 }
 
 # Function to start the ffmpeg stream with dynamically constructed arguments
@@ -358,33 +387,38 @@ start_ffmpeg_stream() {
     cmd=(ffmpeg "${FFMPEG_OPTS[@]}" "${VAAPI_OPTS[@]}")
 
     # --- Input Configuration ---
-    cmd+=(-re -f concat -safe 0 -i "$1") # Use the playlist path passed as an argument
+    cmd+=(
+         -re        # Read input at native frame rate
+         -f concat  # Use concat demuxer
+         -safe 0    # Allow unsafe file paths
+         -i "$1"    # Use the video playlist path passed as an argument
+         )
 
     # --- Music and Filter Configuration ---
     local -a audio_codec_opts
     if [[ "$ENABLE_MUSIC" == "true" && -f "$CONCAT_MUSIC_FILE" ]]; then
         log "MUS" "Music enabled, replacing original video audio. Video filter: ${USE_VIDEO_FILTER}"
-        cmd+=(-stream_loop -1 -i "$CONCAT_MUSIC_FILE")
+        cmd+=(-stream_loop -1 -i "$CONCAT_MUSIC_FILE") # Loop music infinitely
 
         # Determine if audio needs re-encoding based on volume
         if [[ $(awk -v vol="$MUSIC_VOLUME" 'BEGIN { print (vol == 1.0) }') -eq 1 ]]; then
             log "MUS" "Music volume is 1.0, copying audio stream directly (-c:a copy)."
             audio_codec_opts=(-c:a copy)
             if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")
-                cmd+=(-map "[vout]" -map "1:a")
+                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")   # Apply video filter
+                cmd+=(-map "[vout]" -map "1:a")  # Map filtered video and music audio
             else
-                cmd+=(-map 0:v -map "1:a")
+                cmd+=(-map 0:v -map "1:a")  # Map video and music audio directly
             fi
         else
             log "MUS" "Applying music volume (${MUSIC_VOLUME}). Audio will be re-encoded."
             audio_codec_opts=(-c:a aac -ar 44100 -b:a "${AUDIO_BITRATE}")
             if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]")
-                cmd+=(-map "[vout]" -map "[aud]")
+                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]") # Apply video filter and adjust music volume
+                cmd+=(-map "[vout]" -map "[aud]") # Map filtered video and adjusted music audio
             else
-                cmd+=(-filter_complex "[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]")
-                cmd+=(-map 0:v -map "[aud]")
+                cmd+=(-filter_complex "[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]") # Adjust music volume
+                cmd+=(-map 0:v -map "[aud]") # Map video and adjusted music audio
             fi
         fi
         cmd+=(-shortest) # End stream when the video playlist finishes
@@ -393,23 +427,56 @@ start_ffmpeg_stream() {
         log "VID" "Copying audio stream without re-encoding (-c:a copy)."
         audio_codec_opts=(-c:a copy)
         if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-            cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")
-            cmd+=(-map "[vout]" -map "0:a")
+            cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]") # Apply video filter
+            cmd+=(-map "[vout]" -map "0:a") # Map filtered video and original audio
         else
-            cmd+=(-map 0:v -map "0:a")
+            cmd+=(-map 0:v -map "0:a") # Map video and audio directly
         fi
     fi
 
     # --- Codec Configuration ---
     if [[ "$USE_HWACCEL" == "true" ]]; then
-        cmd+=(-c:v h264_vaapi -profile:v high -r "${STREAM_FRAMERATE}" -fps_mode cfr -rc_mode CBR -b:v "${VIDEO_BITRATE}" -maxrate "${VIDEO_BITRATE}" -bufsize "${BUFSIZE}" -g "${GOP_SIZE}" -keyint_min "${GOP_SIZE}")
+        cmd+=(
+             -c:v h264_vaapi                # Use VAAPI H.264 encoder
+             -profile:v high                # High profile for better quality
+             -idr_interval 1                # Insert IDR frames at every keyframe
+             -aud 1                         # Insert Access Unit Delimiter
+             -sei timing+recovery_point     # Insert SEI messages for timing and recovery points
+             -async_depth 4                 # Audio sync depth
+             -coder cabac                   # Use CABAC entropy coding
+             -quality 0                     # Use best quality mode
+             -r "${STREAM_FRAMERATE}"       # Set frame rate
+             -fps_mode cfr                  # Constant frame rate
+             -rc_mode CBR                   # Constant bitrate mode
+             -b:v "${VIDEO_BITRATE}"        # Set video bitrate
+             -maxrate "${VIDEO_BITRATE}"    # Set max bitrate
+             -bufsize "${BUFSIZE}"          # Set buffer size
+             -g "${GOP_SIZE}"               # Set GOP size
+             -keyint_min "${GOP_SIZE}"      # Set minimum GOP size
+             )
     else
-        cmd+=(-c:v libx264 -preset veryfast -r "${STREAM_FRAMERATE}" -fps_mode cfr -minrate "${VIDEO_BITRATE}" -maxrate "${VIDEO_BITRATE}" -bufsize "${BUFSIZE}" -g "${GOP_SIZE}" -keyint_min "${GOP_SIZE}")
+        cmd+=(
+             -c:v libx264                   # Use software x264 encoder
+             -preset veryfast               # Use veryfast preset for low latency
+             -r "${STREAM_FRAMERATE}"       # Set frame rate
+             -fps_mode cfr                  # Constant frame rate
+             -minrate "${VIDEO_BITRATE}"    # Set minimum bitrate
+             -maxrate "${VIDEO_BITRATE}"    # Set maximum bitrate
+             -bufsize "${BUFSIZE}"          # Set buffer size
+             -g "${GOP_SIZE}"               # Set GOP size
+             -keyint_min "${GOP_SIZE}"      # Set minimum GOP size
+             )
     fi
     cmd+=("${audio_codec_opts[@]}")
 
     # --- Output Configuration ---
-    cmd+=(-max_muxing_queue_size 4096 -muxdelay 0 -muxpreload 0  -rw_timeout 15000000 -flvflags no_duration_filesize -rtmp_live live -f flv "$TWITCH_URL/$STREAM_KEY")
+    cmd+=(
+         -max_muxing_queue_size 4096        # Increase muxing queue size to prevent buffer overflows
+         -rw_timeout 15000000               # Set RTMP timeout to 15 seconds (in microseconds)
+         -flvflags no_duration_filesize     # Do not include duration/filesize metadata in FLV
+         -rtmp_live live                    # Set RTMP live mode
+         -f flv "$TWITCH_URL/$STREAM_KEY"   # Output to Twitch RTMP URL
+         )
 
     # --- Progress Monitoring Check ---
     if ! command -v progress &> /dev/null; then
@@ -420,15 +487,21 @@ start_ffmpeg_stream() {
     # --- Logging and Execution ---
     if [[ "$ENABLE_FFMPEG_LOG_FILE" == "true" ]]; then
         local log_level="${FFMPEG_LOG_LEVEL:-info}"
-        cmd+=(-loglevel "${log_level}")
-        log "VID" "Executing FFmpeg command: ${cmd[*]}"
+        cmd+=(-loglevel "${log_level}") # Set ffmpeg log level
+        log "VID" "Executing FFmpeg command (logging to ${FFMPEG_LOG_FILE}): ${cmd[*]}"
         # Run ffmpeg in the background to get its PID, redirecting logs to a file.
-        "${cmd[@]}" >> "$FFMPEG_LOG_FILE" 2>&1
+        "${cmd[@]}" >> "$FFMPEG_LOG_FILE" 2>&1 &
     else
-        cmd+=(-loglevel warning)
+        cmd+=(-loglevel warning) # Set ffmpeg log level
         log "VID" "Executing FFmpeg command: ${cmd[*]}"
-        # Run ffmpeg in the background, allowing its errors to print to the console.
-        "${cmd[@]}" &
+        # If script logging is enabled, pipe ffmpeg's stderr through `tee` to
+        # simultaneously print to the console and append to the script log file.
+        # Otherwise, just run ffmpeg and let its stderr go to the console directly.
+        if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
+            ( "${cmd[@]}" 2>&1 >/dev/null ) | tee -a "${SCRIPT_LOG_FILE}" &
+        else
+            "${cmd[@]}" &
+        fi
     fi
     
     local ffmpeg_pid=$!
@@ -436,9 +509,9 @@ start_ffmpeg_stream() {
 
     # Start the progress monitor in the background if the command exists
     if command -v progress &> /dev/null; then
-        log "INF" "Starting 'progress' monitor for FFmpeg PID: $ffmpeg_pid"
-        monitor_with_progress "$ffmpeg_pid" &
-        monitor_pid=$!
+        log "INF" "Starting 'progress' monitor for the 'ffmpeg' command."
+        monitor_ffmpeg_progress &
+        monitor_pid=$!  # Capture the monitor's PID
     fi
 
     # Use 'wait' to block the script until the ffmpeg process completes.
@@ -448,7 +521,47 @@ start_ffmpeg_stream() {
 
     # Clean up the background monitor process when ffmpeg is done
     if [[ -n "$monitor_pid" ]]; then
-        kill "$monitor_pid" 2>/dev/null || true
+        # Give the monitor time to detect ffmpeg exit and flush the last file
+        # The monitor loop uses `pidof -x ffmpeg` and will exit on its own.
+        # Just wait for it (avoid killing before it writes last_played.txt).
+        # If it’s already gone, wait will return immediately.
+        # Add a small grace if you want:
+        for _ in 1 2 3; do
+            kill -0 "$monitor_pid" 2>/dev/null || break
+            sleep 1
+        done
+        wait "$monitor_pid" 2>/dev/null || true
+        # Read the last played file from the temp file
+        local last_played_file=""
+        if [[ -f "${LOG_DIR}/last_played.txt" ]]; then
+            # Read the last file path and clean up the temp file
+            last_played_file=$(<"${LOG_DIR}/last_played.txt")
+            rm -f "${LOG_DIR}/last_played.txt"  # Clean up
+        fi
+
+        # If we know the last file, log its context in the playlist
+        if [[ -n "$last_played_file" ]]; then
+            local playlist_file="$1"
+            # Find the line number of the last played file in the playlist
+            local line_info
+            line_info=$(grep -nFx "file '$last_played_file'" "$playlist_file" || true)
+
+            if [[ -n "$line_info" ]]; then
+                local line_num="${line_info%%:*}"
+                local total_lines
+                total_lines=$(wc -l < "$playlist_file")
+
+                # Log the last played file
+                log "VID" "Last Played: $(basename "$last_played_file") (File ${line_num}/${total_lines})"
+
+                # Log the next file if it exists
+                if [[ "$line_num" -lt "$total_lines" ]]; then
+                    local next_line_num=$((line_num + 1))
+                    local next_file_line=$(sed -n "${next_line_num}p" "$playlist_file")
+                    log "VID" "  ->   Next: $(basename "${next_file_line#file \'}")"
+                fi
+            fi
+        fi
     fi
     
     # Return the exit code of ffmpeg
@@ -511,10 +624,12 @@ main() {
         log "WAR" "Video playlist duration: $(format_duration "$total_duration") - ${file_count} files"
 
         # --- Launch FFmpeg ---
+        # With 'set -e', a non-zero from start_ffmpeg_stream would kill the script.
+        # Temporarily disable -e so we can capture the exit code and continue.
+        set +e
         start_ffmpeg_stream "$VIDEO_PLAYLIST"
-        # The exit code from ffmpeg is captured and returned by start_ffmpeg_stream
-        # because of 'set -e', the script would exit on a non-zero code here.
-        local exit_code=$? # Will be 0 if ffmpeg exited cleanly
+        local exit_code=$?
+        set -e
         log "INF" "FFmpeg process exited with code ${exit_code}."
 
         # --- Loop Control ---
@@ -528,9 +643,6 @@ main() {
     done
 }
 
-#
 # --- Main Execution ---
-#
-
 # Launch the main logic
 main
