@@ -40,7 +40,7 @@ VIDEO_BITRATE="${VIDEO_BITRATE:-2500k}"
 AUDIO_BITRATE="${AUDIO_BITRATE:-64k}"
 
 # Calculate GOP size for a 2-second keyframe interval, as recommended by Twitch.
-GOP_SIZE=$((STREAM_FRAMERATE * 2))
+GOP_SIZE=$(awk -v fps="$STREAM_FRAMERATE" 'BEGIN { printf "%.0f", fps * 2 }')
 
 # Calculate buffer size as 2.5x video bitrate.
 # Extract numeric part and unit (e.g., 'k' or 'M') from VIDEO_BITRATE.
@@ -61,6 +61,7 @@ ENABLE_PROGRESS_UPDATES="${ENABLE_PROGRESS_UPDATES:-false}"
 
 # FFmpeg resilience/options and basic flags
 FFMPEG_OPTS=(
+    -nostdin                         # Disable interaction on standard input. Essential for background tasks.
     -avoid_negative_ts make_zero     # Shift negative timestamps to start at 0, required for FLV.
     -fflags "+discardcorrupt+genpts" # Drop corrupted frames and generate missing PTS if needed.
 )
@@ -324,6 +325,14 @@ monitor_ffmpeg_progress() {
 
   #log "VID" "Progress check 1"
 
+  # --- Sanitize VIDEO_FILE_TYPES and build alternation regex (Pre-calculated) ---
+  local sanitized_types="${VIDEO_FILE_TYPES%\"}"
+  sanitized_types="${sanitized_types#\"}"
+  sanitized_types="${sanitized_types%\'}"
+  sanitized_types="${sanitized_types#\'}"
+  local file_ext_regex
+  file_ext_regex="$(printf '%s\n' $sanitized_types | paste -sd'|' -)"
+
   while pidof -x ffmpeg >/dev/null 2>&1; do
     # Take a snapshot; don't let a transient error kill the loop
     local output
@@ -338,14 +347,6 @@ monitor_ffmpeg_progress() {
     local filtered_output
     filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
     #log "VID" "Progress filtered_output: ${filtered_output}"
-
-    # --- Sanitize VIDEO_FILE_TYPES and build alternation regex ---
-    local sanitized_types="${VIDEO_FILE_TYPES%\"}"
-    sanitized_types="${sanitized_types#\"}"
-    sanitized_types="${sanitized_types%\'}"
-    sanitized_types="${sanitized_types#\'}"
-    local file_ext_regex
-    file_ext_regex="$(printf '%s\n' $sanitized_types | paste -sd'|' -)"
     #log "VID" "File extension regex: ${file_ext_regex}"
 
     # Extract filename (best-effort)
@@ -364,7 +365,19 @@ monitor_ffmpeg_progress() {
 
     if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
       [[ -n "$last_logged_file" ]] && >&2 echo
-      log "VID" "Now Playing: $(basename "$current_file") (${progress_percent:-0.0%})"
+
+      local file_counter_str=""
+      if [[ -f "$VIDEO_PLAYLIST" ]]; then
+        local total_files
+        total_files=$(grep -c "^file " "$VIDEO_PLAYLIST" || echo 0)
+        local line_num
+        line_num=$(grep -nF "file '$current_file'" "$VIDEO_PLAYLIST" | head -n1 | cut -d: -f1 || true)
+        if [[ -n "$line_num" ]]; then
+          file_counter_str="[${line_num}/${total_files}]"
+        fi
+      fi
+
+      log "VID" "Now Playing ${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
       last_logged_file="$current_file"
     elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
       log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
@@ -498,7 +511,7 @@ start_ffmpeg_stream() {
         # simultaneously print to the console and append to the script log file.
         # Otherwise, just run ffmpeg and let its stderr go to the console directly.
         if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
-            ( "${cmd[@]}" 2>&1 >/dev/null ) | tee -a "${SCRIPT_LOG_FILE}" &
+            "${cmd[@]}" >/dev/null 2> >(tee -a "${SCRIPT_LOG_FILE}" >&2) &
         else
             "${cmd[@]}" &
         fi
@@ -552,13 +565,13 @@ start_ffmpeg_stream() {
                 total_lines=$(wc -l < "$playlist_file")
 
                 # Log the last played file
-                log "VID" "Last Played: $(basename "$last_played_file") (File ${line_num}/${total_lines})"
+                log "ERR" "Last Played: $(basename "$last_played_file") (File ${line_num}/${total_lines})"
 
                 # Log the next file if it exists
                 if [[ "$line_num" -lt "$total_lines" ]]; then
                     local next_line_num=$((line_num + 1))
                     local next_file_line=$(sed -n "${next_line_num}p" "$playlist_file")
-                    log "VID" "  ->   Next: $(basename "${next_file_line#file \'}")"
+                    log "ERR" "  ->   Next: $(basename "${next_file_line#file \'}")"
                 fi
             fi
         fi
