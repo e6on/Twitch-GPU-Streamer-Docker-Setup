@@ -307,6 +307,30 @@ generate_videolist() {
     fi
 }
 
+# Helper to parse progress output
+parse_progress_output() {
+    local output="$1"
+    local file_ext_regex="$2"
+    
+    # Filter out the concatenated music file; allow 'no difference'
+    local filtered_output
+    filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
+
+    # Extract filename (best-effort)
+    local current_file
+    current_file="$(echo "$filtered_output" \
+      | grep -Eo "(/|\.\/)?[^[:space:]]+\.(${file_ext_regex})" \
+      | head -n 1 || true)"
+      
+    # Extract percent (best-effort)
+    local progress_percent
+    progress_percent="$(echo "$output" \
+      | grep -Eo '^[[:space:]]*[0-9]+(\.[0-9]+)?%' \
+      | head -n 1 || true)"
+      
+    echo "$current_file|$progress_percent"
+}
+
 # Function to monitor ffmpeg using the 'progress' command in the background
 monitor_ffmpeg_progress() {
   local last_logged_file=""
@@ -322,8 +346,6 @@ monitor_ffmpeg_progress() {
 
   # Give ffmpeg a moment to start and open a file before we start monitoring
   sleep 3
-
-  #log "VID" "Progress check 1"
 
   # --- Sanitize VIDEO_FILE_TYPES and build alternation regex (Pre-calculated) ---
   local sanitized_types="${VIDEO_FILE_TYPES%\"}"
@@ -341,27 +363,12 @@ monitor_ffmpeg_progress() {
       sleep 1
       continue
     fi
-    #log "VID" "Progress check 2 output: ${output}"
 
-    # Filter out the concatenated music file; allow 'no difference'
-    local filtered_output
-    filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
-    #log "VID" "Progress filtered_output: ${filtered_output}"
-    #log "VID" "File extension regex: ${file_ext_regex}"
-
-    # Extract filename (best-effort)
-    local current_file
-    current_file="$(echo "$filtered_output" \
-      | grep -Eo "(/|\.\/)?[^[:space:]]+\.(${file_ext_regex})" \
-      | head -n 1 || true)"
-    #log "VID" "Current file: ${current_file}"
-
-    # Extract percent (best-effort)
-    local progress_percent
-    progress_percent="$(echo "$output" \
-      | grep -Eo '^[[:space:]]*[0-9]+(\.[0-9]+)?%' \
-      | head -n 1 || true)"
-    #log "VID" "Progress percent: ${progress_percent}"
+    # Parse output using helper
+    local result
+    result=$(parse_progress_output "$output" "$file_ext_regex")
+    local current_file="${result%%|*}"
+    local progress_percent="${result##*|}"
 
     if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
       [[ -n "$last_logged_file" ]] && >&2 echo
@@ -392,64 +399,94 @@ monitor_ffmpeg_progress() {
   >&2 echo
 }
 
-# Function to start the ffmpeg stream with dynamically constructed arguments
-start_ffmpeg_stream() {
-    log "VID" "Preparing to start FFmpeg stream..."
+# Check for permissions
+check_permissions() {
+    if [[ ! -w "$LOG_DIR" ]]; then
+         log "ERR" "Log directory '$LOG_DIR' is not writable. Please check permissions."
+         exit 1
+    fi
+}
 
-    local -a cmd
-    cmd=(ffmpeg "${FFMPEG_OPTS[@]}" "${VAAPI_OPTS[@]}")
+# Check for required dependencies
+check_dependencies() {
+    local deps=("ffmpeg" "ffprobe" "sort" "awk" "sed" "grep" "date" "find")
+    local missing=()
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log "ERR" "Missing required dependencies: ${missing[*]}"
+        exit 1
+    fi
+}
 
-    # --- Input Configuration ---
-    cmd+=(
-         -re        # Read input at native frame rate
-         -f concat  # Use concat demuxer
-         -safe 0    # Allow unsafe file paths
-         -i "$1"    # Use the video playlist path passed as an argument
-         )
+# Helper to build input arguments
+build_input_args() {
+    local playlist_path="$1"
+    echo -re -f concat -safe 0 -i "$playlist_path"
+}
 
-    # --- Music and Filter Configuration ---
-    local -a audio_codec_opts
-    if [[ "$ENABLE_MUSIC" == "true" && -f "$CONCAT_MUSIC_FILE" ]]; then
-        log "MUS" "Music enabled, replacing original video audio. Video filter: ${USE_VIDEO_FILTER}"
-        cmd+=(-stream_loop -1 -i "$CONCAT_MUSIC_FILE") # Loop music infinitely
+# Helper to build audio and filter arguments
+build_audio_and_filter_args() {
+    
+    local use_video_filter="${1}"
+    local enable_music="${2}"
+    local music_volume="${3}"
+    local audio_bitrate="${4}"
+    
+    local -a args=()
+
+    if [[ "$enable_music" == "true" && -f "$CONCAT_MUSIC_FILE" ]]; then
+        log "MUS" "Music enabled, replacing original video audio. Video filter: ${use_video_filter}"
+        args+=(-stream_loop -1 -i "$CONCAT_MUSIC_FILE") # Loop music infinitely
 
         # Determine if audio needs re-encoding based on volume
-        if [[ $(awk -v vol="$MUSIC_VOLUME" 'BEGIN { print (vol == 1.0) }') -eq 1 ]]; then
+        if [[ $(awk -v vol="$music_volume" 'BEGIN { print (vol == 1.0) }') -eq 1 ]]; then
             log "MUS" "Music volume is 1.0, copying audio stream directly (-c:a copy)."
-            audio_codec_opts=(-c:a copy)
-            if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]")   # Apply video filter
-                cmd+=(-map "[vout]" -map "1:a")  # Map filtered video and music audio
+            args+=(-c:a copy)
+            if [[ "$use_video_filter" == "true" ]]; then
+                # Apply video filter and map filtered video and music audio
+                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "1:a")
             else
-                cmd+=(-map 0:v -map "1:a")  # Map video and music audio directly
+                args+=(-map 0:v -map "1:a") # Map video and music audio directly
             fi
         else
-            log "MUS" "Applying music volume (${MUSIC_VOLUME}). Audio will be re-encoded."
-            audio_codec_opts=(-c:a aac -ar 44100 -b:a "${AUDIO_BITRATE}")
-            if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-                cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]") # Apply video filter and adjust music volume
-                cmd+=(-map "[vout]" -map "[aud]") # Map filtered video and adjusted music audio
+            log "MUS" "Applying music volume (${music_volume}). Audio will be re-encoded."
+            args+=(-c:a aac -ar 44100 -b:a "${audio_bitrate}")
+            if [[ "$use_video_filter" == "true" ]]; then
+                # Apply video filter and adjust music volume and map filtered video and adjusted music audio
+                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];[1:a]volume=${music_volume},asetpts=PTS-STARTPTS[aud]" -map "[vout]" -map "[aud]")
             else
-                cmd+=(-filter_complex "[1:a]volume=${MUSIC_VOLUME},asetpts=PTS-STARTPTS[aud]") # Adjust music volume
-                cmd+=(-map 0:v -map "[aud]") # Map video and adjusted music audio
+                # Adjust music volume and map video and adjusted music audio
+                args+=(-filter_complex "[1:a]volume=${music_volume},asetpts=PTS-STARTPTS[aud]" -map 0:v -map "[aud]")
             fi
         fi
-        cmd+=(-shortest) # End stream when the video playlist finishes
+        args+=(-shortest) # End stream when the video playlist finishes
     else
-        log "VID" "Music is disabled. Using video audio directly. Video filter: ${USE_VIDEO_FILTER}"
+        log "VID" "Music is disabled. Using video audio directly. Video filter: ${use_video_filter}"
         log "VID" "Copying audio stream without re-encoding (-c:a copy)."
-        audio_codec_opts=(-c:a copy)
-        if [[ "$USE_VIDEO_FILTER" == "true" ]]; then
-            cmd+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]") # Apply video filter
-            cmd+=(-map "[vout]" -map "0:a") # Map filtered video and original audio
+        args+=(-c:a copy)
+        if [[ "$use_video_filter" == "true" ]]; then
+            # Apply video filter and map filtered video and original audio
+            args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "0:a")
         else
-            cmd+=(-map 0:v -map "0:a") # Map video and audio directly
+            args+=(-map 0:v -map "0:a") # Map video and audio directly
         fi
     fi
+    
+    AUDIO_ARGS=("${args[@]}")
+}
 
-    # --- Codec Configuration ---
-    if [[ "$USE_HWACCEL" == "true" ]]; then
-        cmd+=(
+# Helper to build encoding arguments
+build_codec_args() {
+    local use_hwaccel="$1"
+    local -a args=()
+
+    if [[ "$use_hwaccel" == "true" ]]; then
+        args+=(
              -c:v h264_vaapi                # Use VAAPI H.264 encoder
              -profile:v high                # High profile for better quality
              -idr_interval 1                # Insert IDR frames at every keyframe
@@ -468,7 +505,7 @@ start_ffmpeg_stream() {
              -keyint_min "${GOP_SIZE}"      # Set minimum GOP size
              )
     else
-        cmd+=(
+        args+=(
              -c:v libx264                   # Use software x264 encoder
              -preset veryfast               # Use veryfast preset for low latency
              -r "${STREAM_FRAMERATE}"       # Set frame rate
@@ -480,7 +517,30 @@ start_ffmpeg_stream() {
              -keyint_min "${GOP_SIZE}"      # Set minimum GOP size
              )
     fi
-    cmd+=("${audio_codec_opts[@]}")
+    CODEC_ARGS=("${args[@]}")
+}
+
+# Function to start the ffmpeg stream with dynamically constructed arguments
+start_ffmpeg_stream() {
+    log "VID" "Preparing to start FFmpeg stream..."
+
+    local -a cmd
+    cmd=(ffmpeg "${FFMPEG_OPTS[@]}" "${VAAPI_OPTS[@]}")
+
+    # --- Input Configuration ---
+    # We use simple command substitution here as these args don't have spaces/special chars usually, 
+    # but for safety let's just append directly.
+    cmd+=( $(build_input_args "$1") )
+
+    # --- Music and Filter Configuration ---
+    # Populate AUDIO_ARGS global
+    build_audio_and_filter_args "$USE_VIDEO_FILTER" "$ENABLE_MUSIC" "$MUSIC_VOLUME" "$AUDIO_BITRATE"
+    cmd+=("${AUDIO_ARGS[@]}")
+
+    # --- Codec Configuration ---
+    # Populate CODEC_ARGS global
+    build_codec_args "$USE_HWACCEL"
+    cmd+=("${CODEC_ARGS[@]}")
 
     # --- Output Configuration ---
     cmd+=(
@@ -587,6 +647,12 @@ main() {
         log "ERR" "TWITCH_STREAM_KEY is not set. Please add it to your .env or docker-compose and pass it into the container."
         exit 1
     fi
+
+    # Check for required dependencies
+    check_dependencies
+    
+    # Check for environment permissions
+    check_permissions
 
     log "WAR" "=== STREAM SCRIPT START ==="
     log "INF" "Source: $VIDEO_PLAYLIST"
