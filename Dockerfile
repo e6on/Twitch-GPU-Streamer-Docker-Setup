@@ -55,11 +55,20 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
-# Copy the shell script into the container
+# Copy scripts into the container
 COPY twitch_gpu_streamer.sh /usr/local/bin/twitch_gpu_streamer.sh
 
-# Set execute permissions for the script
+# Set execute permissions for the scripts
 RUN chmod +x /usr/local/bin/twitch_gpu_streamer.sh
+
+# Add metadata labels
+LABEL org.opencontainers.image.title="Twitch GPU Streamer"
+LABEL org.opencontainers.image.description="Docker container for streaming video to Twitch with VA-API GPU acceleration"
+LABEL org.opencontainers.image.version="1.0"
+LABEL org.opencontainers.image.authors="e6on"
+LABEL org.opencontainers.image.url="https://github.com/e6on/Twitch-GPU-Streamer-Docker-Setup"
+LABEL org.opencontainers.image.source="https://github.com/e6on/Twitch-GPU-Streamer-Docker-Setup"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Set the entrypoint to run the streaming script explicitly with bash to avoid exec format errors
 ENTRYPOINT ["/bin/bash", "/usr/local/bin/twitch_gpu_streamer.sh"]

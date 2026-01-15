@@ -10,22 +10,26 @@ services:
     # image: e6on/twitch-gpu-streamer:latest
     container_name: twitch-gpu-streamer
     restart: always
+
     # --- GPU Device Mapping (for Hardware Acceleration) ---
     # The /dev/dri device mapping is for Intel and AMD GPUs using VA-API.
     # This section is only needed if ENABLE_HW_ACCEL is set to "true".
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
       - /dev/dri/card0:/dev/dri/card0
+
     volumes:
       - ./videos:/videos:ro
       - ./music:/music:ro
       - ./data:/data
+
     environment:
       # TWITCH_STREAM_KEY is loaded automatically from the .env file.
       # This line tells compose to pass the variable from the host environment into the container.
       - TWITCH_STREAM_KEY
       - VIDEO_DIR=/videos
       - VIDEO_FILE_TYPES="mp4"
+
       # --- Optional Stream Quality Settings ---
       - ENABLE_HW_ACCEL=true
       - VAAPI_DEVICE=/dev/dri/renderD128
@@ -35,36 +39,64 @@ services:
       - STREAM_FRAMERATE=30
       - VIDEO_BITRATE=2500k
       - AUDIO_BITRATE=64k
+
       # --- Enable Video/Music Shuffle Mode ---
       - ENABLE_SHUFFLE=true
+
       # --- Enable Video Looping ---
       - ENABLE_LOOP=true
+
       # Show per-file progress percentage updates
       #- ENABLE_PROGRESS_UPDATES=true
+
       # --- Optional Background Music ---
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true
       - MUSIC_DIR=/music
       - MUSIC_VOLUME=1.0 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
       - MUSIC_FILE_TYPES="m4a"
+
       # --- Optional FFmpeg File Logging ---
       # The main container log is always clean. Uncomment the line below to also save
       # the full, verbose FFmpeg debug output to a file at ./data/ffmpeg.log.
       # This is useful for troubleshooting but can create large log files.
       #- ENABLE_FFMPEG_LOG_FILE=true
       #- FFMPEG_LOG_LEVEL=debug
+
       # --- Optional Script Event Logging ---
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.
       - ENABLE_SCRIPT_LOG_FILE=true
       # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
+
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
       - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
       - TZ=Europe/Tallinn
+
     # --- Group Permissions (for Hardware Acceleration) ---
     # Grant the container user access to the host's render/video groups for VA-API.
     # This is only needed if ENABLE_HW_ACCEL is set to "true".
     group_add:
       - "105" # GID for the 'render' group
-      - "44"  # GID for the 'video' group
+      - "44" # GID for the 'video' group
+
+	  # --- Optional Resource Limits ---
+    # Uncomment to set CPU and memory limits for the container.
+    # Useful to prevent the stream from consuming all system resources.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2.0'      # Limit to 2 CPU cores
+    #       memory: 2G       # Limit to 2GB RAM
+    #     reservations:
+    #       cpus: '1.0'      # Reserve at least 1 CPU core
+    #       memory: 1G       # Reserve at least 1GB RAM
+
+    # --- Optional Logging Configuration ---
+    # Uncomment to use a different logging driver or limit log size.
+    # logging:
+    #   driver: "json-file"
+    #   options:
+    #     max-size: "10m"
+    #     max-file: "3"

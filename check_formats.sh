@@ -8,10 +8,10 @@
 # incompatible pixel formats, especially when using hardware acceleration.
 #
 # Usage:
-#   ./check_pixel_formats.sh [--root-only] /path/to/your/videos
+#   ./check_formats.sh [--root-only] /path/to/your/videos
 #
 # You can also run this inside your Docker container:
-#   docker-compose exec streamer ./check_pixel_formats.sh /videos
+#   docker-compose exec streamer ./check_formats.sh /videos
 #
 
 set -euo pipefail
