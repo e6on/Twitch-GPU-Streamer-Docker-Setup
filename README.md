@@ -227,8 +227,8 @@ docker stats
 │                          │  • Encode (h264)    │  │
 │                          │  • Mux Audio        │  │
 │                          └──────────┬──────────┘  │
-│                                      │            │
-│                                      ▼            │
+│                                     │             │
+│                                     ▼             │
 │                          ┌─────────────────────┐  │
 │                          │   RTMP Output       │  │
 │                          │   Twitch Ingest     │──┼──▶ Twitch
