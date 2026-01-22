@@ -3,6 +3,34 @@
 # Exit on error, undefined variable, or pipe failure.
 set -euo pipefail
 
+# Cleanup handler for graceful shutdown
+cleanup() {
+    local exit_code=$?
+    log "WAR" "Received shutdown signal. Cleaning up..."
+
+    # Kill ffmpeg processes
+    if [[ -n "${FFMPEG_PID:-}" ]] && kill -0 "$FFMPEG_PID" 2>/dev/null; then
+        log "INF" "Stopping ffmpeg (PID: $FFMPEG_PID)..."
+        kill -TERM "$FFMPEG_PID" 2>/dev/null || true
+        wait "$FFMPEG_PID" 2>/dev/null || true
+    fi
+
+    # Kill monitor process
+    if [[ -n "${MONITOR_PID:-}" ]] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+        kill -TERM "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+    fi
+
+    # Clean up temp files
+    rm -f "${LOG_DIR}/last_played.txt" "${VIDEO_PLAYLIST}.tmp.$$" "${MUSIC_LIST}.tmp.$$" 2>/dev/null || true
+
+    log "WAR" "Cleanup complete. Exiting with code ${exit_code}."
+    exit "$exit_code"
+}
+
+# Set up signal traps
+trap cleanup EXIT TERM INT
+
 # Read environment variables (docker-compose passes these in). Provide sensible defaults.
 # Use TWITCH_INGEST_URL or fallback to the default Twitch RTMP URL.
 TWITCH_URL="${TWITCH_INGEST_URL:-rtmp://live.twitch.tv/app}"
@@ -31,7 +59,15 @@ MUSIC_LIST="${MUSIC_LIST:-$LOG_DIR/music_list.txt}"
 CONCAT_MUSIC_FILE="${LOG_DIR:-/data}/music.m4a"
 ENABLE_MUSIC="${ENABLE_MUSIC:-false}"
 MUSIC_VOLUME="${MUSIC_VOLUME:-1.0}"
-MUSIC_FILE_TYPES="${MUSIC_FILE_TYPES:-mp3 flac wav ogg}"
+MUSIC_FILE_TYPES="${MUSIC_FILE_TYPES:-mp3 flac wav ogg m4a aac}"
+
+# Network retry settings
+MAX_RETRY_ATTEMPTS="${MAX_RETRY_ATTEMPTS:-3}"
+RETRY_DELAY="${RETRY_DELAY:-10}"
+
+# Global PID variables
+FFMPEG_PID=""
+MONITOR_PID=""
 
 # Streaming resolution & bitrates
 STREAM_RESOLUTION="${STREAM_RESOLUTION:-1280x720}"
@@ -56,6 +92,8 @@ ENABLE_HW_ACCEL="${ENABLE_HW_ACCEL:-false}"
 
 # Loop and reshuffle control
 ENABLE_LOOP="${ENABLE_LOOP:-false}"
+# Delay in seconds before restarting stream after a loop (0 = instant restart)
+LOOP_RESTART_DELAY="${LOOP_RESTART_DELAY:-0}"
 # Show per-file progress percentage updates
 ENABLE_PROGRESS_UPDATES="${ENABLE_PROGRESS_UPDATES:-false}"
 
@@ -138,7 +176,17 @@ log() {
 
 # Function to format seconds into a human-readable string (d h:m:s)
 format_duration() {
-    local total_seconds=${1%.*} # Use integer part of seconds
+    local input="${1:-0}"
+    # Take only the first line and word (in case of contaminated input)
+    input=$(echo "$input" | head -n1 | awk '{print $1}')
+    local total_seconds=${input%.*} # Use integer part of seconds
+
+    # Validate that total_seconds is a number
+    if ! [[ "$total_seconds" =~ ^[0-9]+$ ]]; then
+        echo "0h:00m:00s"
+        return
+    fi
+
     if [[ -z "$total_seconds" || "$total_seconds" -le 0 ]]; then
         echo "0h:00m:00s"
         return
@@ -157,9 +205,14 @@ format_duration() {
     echo "$formatted_duration"
 }
 
-# Function to calculate total duration of a playlist
+# Cache file for playlist durations to avoid recalculating
+DURATION_CACHE="${LOG_DIR}/duration_cache.txt"
+
+# Function to calculate total duration of a playlist with caching
 get_playlist_duration() {
     local playlist_file="$1"
+    local source_dir="${2:-}"
+    local use_cache="${3:-true}"
     local total_duration=0
     local file_count=0
 
@@ -168,29 +221,77 @@ get_playlist_duration() {
         return
     fi
 
+    # Quick file count check
+    file_count=$(grep -c "^file " "$playlist_file" 2>/dev/null || echo 0)
+    
+    # Cache key based on source directory and file count (shuffle-friendly)
+    # This allows cache hits even when playlist is regenerated in different order
+    local cache_key
+    cache_key=$(echo "${source_dir}:${file_count}" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "${source_dir}_${file_count}")
+    
+    if [[ "$use_cache" == "true" && -f "$DURATION_CACHE" ]]; then
+        local cached_line
+        # Look for cache entry with matching key and file count
+        # Format: cache_key:duration file_count (space before file_count)
+        cached_line=$(grep "^${cache_key}:" "$DURATION_CACHE" 2>/dev/null | grep " ${file_count}$" || true)
+        if [[ -n "$cached_line" ]]; then
+            log "INF" "Cache hit for $(basename "$source_dir") (${file_count} files) - using cached duration"
+            # Return cached values: duration and file count
+            echo "$cached_line" | cut -d':' -f2-
+            return
+        fi
+    fi
+    
+    # Cache miss - need to calculate
+    log "INF" "Cache miss for $(basename "$source_dir") (${file_count} files) - calculating durations..."
+
     local playlist_dir
     playlist_dir=$(dirname "$playlist_file")
 
     # Process the entire playlist file with awk for efficiency and to avoid subshell issues.
-    # This is significantly faster than looping in bash and calling external commands for each line.
-    awk -v playlist_dir="$playlist_dir" '
-        BEGIN { FS = "\x27"; total_duration = 0; file_count = 0; } # Use single quote as field separator
+    # Filter output to only get the final summary line (duration and file count)
+    local result
+    result=$(awk -v playlist_dir="$playlist_dir" '
+        BEGIN { FS = "\x27"; total_duration = 0; file_count = 0; }
         /^file / {
             file_count++;
-            # The file path is the second field when splitting by single quotes
             relative_path = $2;
-            # Prepend the playlist directory to form a full path, unless it is already absolute.
             full_path = (relative_path ~ /^\//) ? relative_path : playlist_dir "/" relative_path;
-            
-            # Use ffprobe to get the duration for all file types.
-            cmd = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"" full_path "\"";
-            if ((cmd | getline duration) > 0) {
-                total_duration += duration;
+
+            # Use ffprobe with explicit output format to get only the duration value
+            cmd = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"" full_path "\" 2>&1";
+            duration = "";
+            while ((cmd | getline line) > 0) {
+                # Only capture lines that are pure numbers (duration values)
+                if (line ~ /^[0-9]+(\.[0-9]+)?$/) {
+                    duration = line;
+                }
             }
             close(cmd);
+
+            if (duration != "" && duration > 0) {
+                total_duration += duration;
+            }
         }
         END { printf "%.6f %d\n", total_duration, file_count; }
-    ' "$playlist_file"
+    ' "$playlist_file" | tail -n 1)
+
+    # Validate the result format (should be "number number")
+    if ! echo "$result" | grep -qE '^[0-9]+(\.[0-9]+)? [0-9]+$'; then
+        log "WAR" "Invalid duration result for $playlist_file, using 0"
+        result="0 0"
+    fi
+
+    # Cache the result with new format: cache_key:duration file_count
+    if [[ "$use_cache" == "true" ]]; then
+        mkdir -p "$(dirname "$DURATION_CACHE")"
+        # Remove old entries for this cache key and add new one
+        grep -v "^${cache_key}:" "$DURATION_CACHE" 2>/dev/null > "${DURATION_CACHE}.tmp" || true
+        echo "${cache_key}:${result}" >> "${DURATION_CACHE}.tmp"
+        mv "${DURATION_CACHE}.tmp" "$DURATION_CACHE" 2>/dev/null || true
+    fi
+
+    echo "$result"
 }
 
 # Generic function to generate a playlist file from a directory of media files.
@@ -202,14 +303,14 @@ generate_playlist() {
     local media_type="$4"
 
     log "INF" "Generating ${media_type} list from ${source_dir} for types: ${file_types}..."
-    
+
     # Sanitize file_types to handle values passed with quotes from docker-compose
     local sanitized_file_types="${file_types%\"}"
     sanitized_file_types="${sanitized_file_types#\"}"
 
     if [[ -z "${sanitized_file_types}" ]]; then
         log "WAR" "No file types specified for ${media_type}. Playlist will be empty."
-        > "${output_file}"
+        : > "${output_file}"
         return
     fi
 
@@ -245,11 +346,11 @@ generate_playlist() {
             echo "file '$file'"
         done
     } > "$temp_file"
-    
+
     # Move temp file to final location (atomic operation)
     mv "$temp_file" "$output_file" 2>/dev/null || true
-    
-    local count=$(grep -c "^file " "${output_file}" 2>/dev/null || echo 0)
+    local count
+    count=$(grep -c "^file " "${output_file}" 2>/dev/null || echo 0)
     log "INF" "${media_type} file list generated at ${output_file} with ${count} entries"
 }
 
@@ -262,7 +363,8 @@ generate_musiclist() {
     generate_playlist "${MUSIC_DIR}" "${MUSIC_FILE_TYPES}" "${MUSIC_LIST}" "Music"
 
     # Check if playlist is empty
-    local count=$(grep -c "^file " "${MUSIC_LIST}" 2>/dev/null || echo 0)
+    local count
+    count=$(grep -c "^file " "${MUSIC_LIST}" 2>/dev/null || echo 0)
     if [[ $count -eq 0 ]]; then
         log "WAR" "Found no music files under $MUSIC_DIR - disabling music."
         ENABLE_MUSIC="false"
@@ -270,8 +372,9 @@ generate_musiclist() {
     else
         # Log music playlist duration
         local duration_info
-        duration_info=$(get_playlist_duration "$MUSIC_LIST")
-        local formatted_duration=$(format_duration "$(echo "$duration_info" | cut -d' ' -f1)")
+        duration_info=$(get_playlist_duration "$MUSIC_LIST" "$MUSIC_DIR")
+        local formatted_duration
+        formatted_duration=$(format_duration "$(echo "$duration_info" | cut -d' ' -f1)")
         log "WAR" "Music playlist duration: ${formatted_duration} - $(echo "$duration_info" | cut -d' ' -f2) files"
 
         # Concatenate music files into a single file for stable looping
@@ -311,7 +414,7 @@ generate_videolist() {
 parse_progress_output() {
     local output="$1"
     local file_ext_regex="$2"
-    
+
     # Filter out the concatenated music file; allow 'no difference'
     local filtered_output
     filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
@@ -321,13 +424,13 @@ parse_progress_output() {
     current_file="$(echo "$filtered_output" \
       | grep -Eo "(/|\.\/)?[^[:space:]]+\.(${file_ext_regex})" \
       | head -n 1 || true)"
-      
+
     # Extract percent (best-effort)
     local progress_percent
     progress_percent="$(echo "$output" \
       | grep -Eo '^[[:space:]]*[0-9]+(\.[0-9]+)?%' \
       | head -n 1 || true)"
-      
+
     echo "$current_file|$progress_percent"
 }
 
@@ -353,7 +456,7 @@ monitor_ffmpeg_progress() {
   sanitized_types="${sanitized_types%\'}"
   sanitized_types="${sanitized_types#\'}"
   local file_ext_regex
-  file_ext_regex="$(printf '%s\n' $sanitized_types | paste -sd'|' -)"
+    file_ext_regex="$(printf '%s\n' "$sanitized_types" | paste -sd'|' -)"
 
   while pidof -x ffmpeg >/dev/null 2>&1; do
     # Take a snapshot; don't let a transient error kill the loop
@@ -384,7 +487,7 @@ monitor_ffmpeg_progress() {
         fi
       fi
 
-      log "VID" "Now Playing ${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
+      log "VID" "Now Playing #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
       last_logged_file="$current_file"
     elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
       log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
@@ -416,7 +519,7 @@ check_dependencies() {
             missing+=("$dep")
         fi
     done
-    
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log "ERR" "Missing required dependencies: ${missing[*]}"
         exit 1
@@ -429,14 +532,22 @@ build_input_args() {
     echo -re -f concat -safe 0 -i "$playlist_path"
 }
 
+# Helper to check if video has audio stream
+has_audio_stream() {
+    local video_file="$1"
+    local audio_streams
+    audio_streams=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$video_file" 2>/dev/null | wc -l)
+    [[ $audio_streams -gt 0 ]]
+}
+
 # Helper to build audio and filter arguments
 build_audio_and_filter_args() {
-    
+
     local use_video_filter="${1}"
     local enable_music="${2}"
     local music_volume="${3}"
     local audio_bitrate="${4}"
-    
+
     local -a args=()
 
     if [[ "$enable_music" == "true" && -f "$CONCAT_MUSIC_FILE" ]]; then
@@ -467,16 +578,30 @@ build_audio_and_filter_args() {
         args+=(-shortest) # End stream when the video playlist finishes
     else
         log "VID" "Music is disabled. Using video audio directly. Video filter: ${use_video_filter}"
-        log "VID" "Copying audio stream without re-encoding (-c:a copy)."
-        args+=(-c:a copy)
-        if [[ "$use_video_filter" == "true" ]]; then
-            # Apply video filter and map filtered video and original audio
-            args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "0:a")
+        # Check if the first video has audio before copying
+        local first_video
+        first_video=$(grep -m1 "^file " "$VIDEO_PLAYLIST" | sed "s/^file '\(.*\)'/\1/" || true)
+
+        if [[ -n "$first_video" ]] && has_audio_stream "$first_video"; then
+            log "VID" "Copying audio stream without re-encoding (-c:a copy)."
+            args+=(-c:a copy)
+            if [[ "$use_video_filter" == "true" ]]; then
+                # Apply video filter and map filtered video and original audio
+                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "0:a?")
+            else
+                args+=(-map 0:v -map "0:a?") # Map video and audio directly (? makes it optional)
+            fi
         else
-            args+=(-map 0:v -map "0:a") # Map video and audio directly
+            log "WAR" "Video has no audio stream. Encoding silent audio."
+            args+=(-c:a aac -ar 44100 -b:a "${audio_bitrate}")
+            if [[ "$use_video_filter" == "true" ]]; then
+                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];anullsrc=r=44100:cl=stereo[aud]" -map "[vout]" -map "[aud]")
+            else
+                args+=(-f lavfi -i anullsrc=r=44100:cl=stereo -map 0:v -map 1:a)
+            fi
         fi
     fi
-    
+
     AUDIO_ARGS=("${args[@]}")
 }
 
@@ -520,6 +645,25 @@ build_codec_args() {
     CODEC_ARGS=("${args[@]}")
 }
 
+# Detect network errors from ffmpeg output
+detect_network_error() {
+    local exit_code="$1"
+    local log_file="${2:-}"
+
+    # Exit codes that indicate network issues
+    if [[ $exit_code -eq 1 || $exit_code -eq 255 ]]; then
+        if [[ -n "$log_file" && -f "$log_file" ]]; then
+            # Check for common network error messages
+            if grep -qE "(Connection (refused|reset|timed out)|Network is unreachable|I/O error|RTMP.*error)" "$log_file" 2>/dev/null; then
+                return 0
+            fi
+        fi
+        # Assume network error for these exit codes even without log confirmation
+        return 0
+    fi
+    return 1
+}
+
 # Function to start the ffmpeg stream with dynamically constructed arguments
 start_ffmpeg_stream() {
     log "VID" "Preparing to start FFmpeg stream..."
@@ -528,8 +672,7 @@ start_ffmpeg_stream() {
     cmd=(ffmpeg "${FFMPEG_OPTS[@]}" "${VAAPI_OPTS[@]}")
 
     # --- Input Configuration ---
-    # We use simple command substitution here as these args don't have spaces/special chars usually, 
-    # but for safety let's just append directly.
+    # shellcheck disable=SC2207
     cmd+=( $(build_input_args "$1") )
 
     # --- Music and Filter Configuration ---
@@ -576,7 +719,7 @@ start_ffmpeg_stream() {
             "${cmd[@]}" &
         fi
     fi
-    
+
     local ffmpeg_pid=$!
     local monitor_pid=""
 
@@ -630,13 +773,14 @@ start_ffmpeg_stream() {
                 # Log the next file if it exists
                 if [[ "$line_num" -lt "$total_lines" ]]; then
                     local next_line_num=$((line_num + 1))
-                    local next_file_line=$(sed -n "${next_line_num}p" "$playlist_file")
+                    local next_file_line
+                    next_file_line=$(sed -n "${next_line_num}p" "$playlist_file")
                     log "ERR" "  ->   Next: $(basename "${next_file_line#file \'}")"
                 fi
             fi
         fi
     fi
-    
+
     # Return the exit code of ffmpeg
     return $exit_code
 }
@@ -650,9 +794,13 @@ main() {
 
     # Check for required dependencies
     check_dependencies
-    
+
     # Check for environment permissions
     check_permissions
+
+    # Initialize duration cache
+    mkdir -p "$(dirname "$DURATION_CACHE")"
+    touch "$DURATION_CACHE" 2>/dev/null || true
 
     log "WAR" "=== STREAM SCRIPT START ==="
     log "INF" "Source: $VIDEO_PLAYLIST"
@@ -697,19 +845,45 @@ main() {
 
         # Log video playlist duration
         local duration_info
-        duration_info=$(get_playlist_duration "$VIDEO_PLAYLIST")
-        local total_duration=$(echo "$duration_info" | cut -d' ' -f1)
-        local file_count=$(echo "$duration_info" | cut -d' ' -f2)
+        duration_info=$(get_playlist_duration "$VIDEO_PLAYLIST" "$VIDEO_DIR")
+        local total_duration
+        total_duration=$(echo "$duration_info" | cut -d' ' -f1)
+        local file_count
+        file_count=$(echo "$duration_info" | cut -d' ' -f2)
         log "WAR" "Video playlist duration: $(format_duration "$total_duration") - ${file_count} files"
 
-        # --- Launch FFmpeg ---
-        # With 'set -e', a non-zero from start_ffmpeg_stream would kill the script.
-        # Temporarily disable -e so we can capture the exit code and continue.
-        set +e
-        start_ffmpeg_stream "$VIDEO_PLAYLIST"
-        local exit_code=$?
-        set -e
-        log "INF" "FFmpeg process exited with code ${exit_code}."
+        # --- Launch FFmpeg with retry logic for network errors ---
+        local retry_count=0
+        local exit_code=1
+        local should_retry=true
+
+        while [[ $retry_count -lt $MAX_RETRY_ATTEMPTS && "$should_retry" == "true" ]]; do
+            if [[ $retry_count -gt 0 ]]; then
+                log "WAR" "Retry attempt ${retry_count}/${MAX_RETRY_ATTEMPTS} in ${RETRY_DELAY} seconds..."
+                sleep "$RETRY_DELAY"
+            fi
+
+            # Temporarily disable -e so we can capture the exit code and continue.
+            set +e
+            start_ffmpeg_stream "$VIDEO_PLAYLIST"
+            exit_code=$?
+            set -e
+
+            log "INF" "FFmpeg process exited with code ${exit_code}."
+
+            # Check if this was a network error that should be retried
+            if detect_network_error "$exit_code" "${FFMPEG_LOG_FILE}"; then
+                log "ERR" "Network error detected. Will retry if attempts remain."
+                retry_count=$((retry_count + 1))
+            else
+                # Not a network error, don't retry
+                should_retry=false
+            fi
+        done
+
+        if [[ $retry_count -ge $MAX_RETRY_ATTEMPTS ]]; then
+            log "ERR" "Max retry attempts (${MAX_RETRY_ATTEMPTS}) reached. Giving up."
+        fi
 
         # --- Loop Control ---
         if [[ "$ENABLE_LOOP" != "true" ]]; then
@@ -717,8 +891,12 @@ main() {
             break
         fi
 
-        log "INF" "Looping enabled. Restarting stream in 5 seconds..."
-        sleep 5
+        if [[ $LOOP_RESTART_DELAY -gt 0 ]]; then
+            log "INF" "Looping enabled. Restarting stream in ${LOOP_RESTART_DELAY} seconds..."
+            sleep "$LOOP_RESTART_DELAY"
+        else
+            log "INF" "Looping enabled. Restarting stream immediately..."
+        fi
     done
 }
 

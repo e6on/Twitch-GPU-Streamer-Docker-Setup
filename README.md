@@ -55,6 +55,7 @@ All configuration is done through environment variables in the `.env` file or `d
 | `VIDEO_DIR` | `/videos` | Video source directory |
 | `VIDEO_FILE_TYPES` | `mp4 mkv mov avi webm flv` | Supported video formats |
 | `ENABLE_LOOP` | `false` | Loop playlist indefinitely |
+| `LOOP_RESTART_DELAY` | `5` | Delay in seconds before restarting stream after a loop (0 = instant restart) |
 | `ENABLE_SHUFFLE` | `false` | Randomize playlist order |
 
 ### Background Music

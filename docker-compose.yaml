@@ -45,6 +45,7 @@ services:
 
       # --- Enable Video Looping ---
       - ENABLE_LOOP=true
+      - LOOP_RESTART_DELAY=0
 
       # Show per-file progress percentage updates
       #- ENABLE_PROGRESS_UPDATES=true
@@ -80,8 +81,8 @@ services:
     group_add:
       - "105" # GID for the 'render' group
       - "44" # GID for the 'video' group
-
-	  # --- Optional Resource Limits ---
+      
+    # --- Optional Resource Limits ---
     # Uncomment to set CPU and memory limits for the container.
     # Useful to prevent the stream from consuming all system resources.
     # deploy:
