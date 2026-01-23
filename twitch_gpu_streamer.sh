@@ -41,7 +41,7 @@ STREAM_KEY="${TWITCH_STREAM_KEY:-}"
 
 # Logging: allow customizing script log file and enable ffmpeg log separately
 LOG_DIR="${LOG_DIR:-/data}"
-SCRIPT_LOG_FILE="${SCRIPT_LOG_FILE:-$LOG_DIR/stream_log.txt}"
+SCRIPT_LOG_FILE="${SCRIPT_LOG_FILE:-$LOG_DIR/stream.log}"
 ENABLE_SCRIPT_LOG_FILE="${ENABLE_SCRIPT_LOG_FILE:-false}"
 ENABLE_FFMPEG_LOG_FILE="${ENABLE_FFMPEG_LOG_FILE:-false}"
 FFMPEG_LOG_FILE="${FFMPEG_LOG_FILE:-$LOG_DIR/ffmpeg.log}"
@@ -135,6 +135,7 @@ readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
 readonly RED='\033[0;31m'
 readonly CYAN='\033[1;36m'
+readonly BLUE='\033[1;34m'
 readonly NC='\033[0m' # No Color
 
 # Logging function
@@ -152,6 +153,7 @@ log() {
         WAR) color="${YELLOW}" ;;
         VID) color="${CYAN}" ;;
         ERR) color="${RED}" ;;
+        SET) color="${BLUE}" ;;
     esac
 
     if [[ "$no_newline_flag" == "-n" ]]; then
@@ -204,6 +206,28 @@ format_duration() {
     formatted_duration+=$(printf "%dh:%02dm:%02ds" "$hours" "$minutes" "$seconds")
     echo "$formatted_duration"
 }
+
+# Helper to pad string with spaces or truncate
+pad_str() {
+    local str="$1"
+    local width="$2"
+    local len=${#str}
+    if [[ $len -gt $width ]]; then
+        echo "${str:0:$((width-3))}..."
+    else
+        printf "%-${width}s" "$str"
+    fi
+}
+
+# Helper to draw a horizontal line
+draw_line() {
+    local width="$1"
+    local char="$2"
+    if [[ $width -gt 0 ]]; then
+        printf "%0.s${char}" $(seq 1 "$width")
+    fi
+}
+
 
 # Cache file for playlist durations to avoid recalculating
 DURATION_CACHE="${LOG_DIR}/duration_cache.txt"
@@ -803,19 +827,117 @@ main() {
     touch "$DURATION_CACHE" 2>/dev/null || true
 
     log "WAR" "=== STREAM SCRIPT START ==="
-    log "INF" "Source: $VIDEO_PLAYLIST"
-    log "INF" "Resolution: $STREAM_RESOLUTION"
-    log "INF" "VA-API Device: $VAAPI_DEVICE"
-    log "INF" "TWITCH ingest URL: $TWITCH_URL"
-    log "INF" "Framerate: ${STREAM_FRAMERATE}fps, GOP Size: ${GOP_SIZE} (2s keyframe interval)"
-    log "INF" "VIDEO bitrate: $VIDEO_BITRATE, AUDIO bitrate: $AUDIO_BITRATE"
-    log "INF" "Buffer Size (bufsize): $BUFSIZE"
-    log "INF" "Hardware acceleration: $USE_HWACCEL"
-    log "INF" "Music Enabled: $ENABLE_MUSIC"
-    log "INF" "Looping Enabled: $ENABLE_LOOP"
-    log "INF" "Shuffle Enabled: ${ENABLE_SHUFFLE:-false}"
-    log "INF" "FFmpeg log file: $FFMPEG_LOG_FILE (enabled: $ENABLE_FFMPEG_LOG_FILE)"
-    [[ -n "$FFMPEG_LOG_LEVEL" ]] && log "INF" "FFmpeg log level override: $FFMPEG_LOG_LEVEL"
+
+    # --- Dynamic Box Layout Configuration ---
+    
+    # Helper to calculate max length from a list of strings
+    get_max_len() {
+        printf "%s\n" "$@" | awk '{ if (length($0) > max) max = length($0) } END { print max }'
+    }
+
+    # 1. Define all values first to measure them
+    local v_source=": $VIDEO_PLAYLIST"
+    local v_res=": $STREAM_RESOLUTION"
+    local v_fps=": ${STREAM_FRAMERATE}fps"
+    local v_bit=": $VIDEO_BITRATE"
+    local v_gop=": $GOP_SIZE (2s)"
+    local v_buf=": $BUFSIZE"
+    local v_hw=": $USE_HWACCEL"
+    local v_dev=": $VAAPI_DEVICE"
+    
+    local v_abit=": $AUDIO_BITRATE"
+    local v_music=": $ENABLE_MUSIC"
+    local v_loop=": $ENABLE_LOOP"
+    local v_shuf=": ${ENABLE_SHUFFLE:-false}"
+    
+    # 2. Calculate dynamic widths
+    # Left Column: Label (~14 chars) + Value + Padding
+    local max_l_val_len
+    if [[ "$USE_HWACCEL" == "true" ]]; then
+        max_l_val_len=$(get_max_len "$v_source" "$v_res" "$v_fps" "$v_bit" "$v_gop" "$v_buf" "$v_hw" "$v_dev")
+    else
+        max_l_val_len=$(get_max_len "$v_source" "$v_res" "$v_fps" "$v_bit" "$v_gop" "$v_buf" "$v_hw")
+    fi
+    local L_WIDTH=$((max_l_val_len + 14)) # 14 for Label + 2 padding
+    [[ $L_WIDTH -lt 20 ]] && L_WIDTH=20   # Enforce minimum width for header
+
+    # Right Column: Label (~16 chars) + Value + Padding
+    local max_r_val_len
+    max_r_val_len=$(get_max_len "$v_abit" "$v_music" "$v_loop" "$v_shuf")
+    local R_WIDTH=$((max_r_val_len + 16)) # 16 for Label + 2 padding
+    [[ $R_WIDTH -lt 15 ]] && R_WIDTH=15   # Enforce minimum width for header
+
+    local FULL_WIDTH=$((L_WIDTH + R_WIDTH + 3))
+    
+    # Unicode box characters
+    local V="│"
+    local H="─"
+    local TT="┬"
+    
+    # Helper to simplify printing a 2-column row
+    print_2col() {
+        local l_text="$1"
+        local r_text="$2"
+        log "SET" "$V $l_text $V $r_text $V"
+    }
+
+    # Prepare Values with padded strings
+    local val_source=$(pad_str "$v_source" $((L_WIDTH-14)))
+    local val_res=$(pad_str "$v_res" $((L_WIDTH-14)))
+    local val_fps=$(pad_str "$v_fps" $((L_WIDTH-14)))
+    local val_bit=$(pad_str "$v_bit" $((L_WIDTH-14)))
+    local val_gop=$(pad_str "$v_gop" $((L_WIDTH-14)))
+    local val_buf=$(pad_str "$v_buf" $((L_WIDTH-14)))
+    local val_hw=$(pad_str "$v_hw" $((L_WIDTH-14)))
+    local val_dev=$(pad_str "$v_dev" $((L_WIDTH-14)))
+    local val_empty_l=$(pad_str "" $((L_WIDTH)))
+
+    local val_abit=$(pad_str "$v_abit" $((R_WIDTH-16)))
+    local val_music=$(pad_str "$v_music" $((R_WIDTH-16)))
+    local val_loop=$(pad_str "$v_loop" $((R_WIDTH-16)))
+    local val_shuf=$(pad_str "$v_shuf" $((R_WIDTH-16)))
+    local val_empty_r=$(pad_str "" $((R_WIDTH)))
+
+    # --- Draw Top Section ---
+    local header_l="┌─── Video Configuration $(draw_line $((L_WIDTH - 22)) "$H")"
+    local header_r="─ Audio Configuration $(draw_line $((R_WIDTH - 20)) "$H")┐"
+    log "SET" "${header_l}${TT}${header_r}"
+
+    print_2col "$(printf "%-13s %s" "Source" "$val_source")" "$(printf "%-15s %s" "Audio Bitrate" "$val_abit")"
+    print_2col "$(printf "%-13s %s" "Resolution" "$val_res")" "$(printf "%-15s %s" "Music Enabled" "$val_music")"
+    print_2col "$(printf "%-13s %s" "Framerate" "$val_fps")" "$val_empty_r"
+    print_2col "$(printf "%-13s %s" "Bitrate" "$val_bit")" "$val_empty_r"
+
+    # Split header for Loop & Shuffle
+    local mid_r="├─ Loop & Shuffle $(draw_line $((R_WIDTH - 15)) "$H")┤"
+    log "SET" "$V $(printf "%-13s %s" "GOP Size" "$val_gop") $mid_r"
+
+    print_2col "$(printf "%-13s %s" "Buffer Size" "$val_buf")" "$(printf "%-15s %s" "Loop Enabled" "$val_loop")"
+    print_2col "$(printf "%-13s %s" "HW Accel" "$val_hw")" "$(printf "%-15s %s" "Shuffle Enabled" "$val_shuf")"
+
+    if [[ "$USE_HWACCEL" == "true" ]]; then
+        print_2col "$(printf "%-13s %s" "VA-API Device" "$val_dev")" "$val_empty_r"
+    else
+        print_2col "$val_empty_l" "$val_empty_r"
+    fi
+
+    # --- Draw Stream Destination ---
+    log "SET" "├─── Stream Destination $(draw_line $((L_WIDTH - 21)) "$H")┴$(draw_line $((R_WIDTH + 2)) "$H")┤"
+    local val_url
+    val_url=$(pad_str ": $TWITCH_URL" $((FULL_WIDTH - 14)))
+    log "SET" "$V $(printf "%-13s %s" "URL" "$val_url") $V"
+
+    # --- Draw Logging ---
+    log "SET" "├─── Logging $(draw_line $((FULL_WIDTH - 10)) "$H")┤"
+    local val_flog
+    val_flog=$(pad_str ": $FFMPEG_LOG_FILE (enabled: $ENABLE_FFMPEG_LOG_FILE)" $((FULL_WIDTH - 14)))
+    local val_lvl
+    val_lvl=$(pad_str ": $FFMPEG_LOG_LEVEL" $((FULL_WIDTH - 14)))
+    log "SET" "$V $(printf "%-13s %s" "FFmpeg Log" "$val_flog") $V"
+    if [[ -n "$FFMPEG_LOG_LEVEL" ]]; then
+        log "SET" "$V $(printf "%-13s %s" "Log Level" "$val_lvl") $V"
+    fi
+    log "SET" "└$(draw_line $((FULL_WIDTH + 2)) "$H")┘"
 
     # Initial wait for the video playlist to be generated by the sidecar
     generate_videolist
