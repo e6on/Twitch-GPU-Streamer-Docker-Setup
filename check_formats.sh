@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+# Ensure UTF-8 locale for correct emoji display
+export LC_ALL=C.UTF-8
+
 # --- Configuration ---
 # Add or remove video file extensions as needed.
 VIDEO_EXTENSIONS="mp4 mkv mov avi webm ts"

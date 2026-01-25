@@ -3,6 +3,9 @@
 # Exit on error, undefined variable, or pipe failure.
 set -euo pipefail
 
+# Ensure UTF-8 locale for correct character counting and Unicode support
+export LC_ALL=C.UTF-8
+
 # Cleanup handler for graceful shutdown
 cleanup() {
     local exit_code=$?
@@ -511,7 +514,7 @@ monitor_ffmpeg_progress() {
         fi
       fi
 
-      log "VID" "Now Playing #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
+      log "VID" "▶ #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
       last_logged_file="$current_file"
     elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
       log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
