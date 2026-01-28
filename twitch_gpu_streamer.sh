@@ -227,7 +227,7 @@ draw_line() {
     local width="$1"
     local char="$2"
     if [[ $width -gt 0 ]]; then
-        printf "%0.s${char}" $(seq 1 "$width")
+        printf -- "${char}%.0s" $(seq 1 "$width")
     fi
 }
 
@@ -501,7 +501,6 @@ monitor_ffmpeg_progress() {
     local progress_percent="${result##*|}"
 
     if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
-      [[ -n "$last_logged_file" ]] && >&2 echo
 
       local file_counter_str=""
       if [[ -f "$VIDEO_PLAYLIST" ]]; then
@@ -875,7 +874,8 @@ main() {
     # Unicode box characters
     local V="│"
     local H="─"
-    local TT="┬"
+    local HH="═"
+    local TT="╤"
     
     # Helper to simplify printing a 2-column row
     print_2col() {
@@ -902,8 +902,8 @@ main() {
     local val_empty_r=$(pad_str "" $((R_WIDTH)))
 
     # --- Draw Top Section ---
-    local header_l="┌─── Video Configuration $(draw_line $((L_WIDTH - 22)) "$H")"
-    local header_r="─ Audio Configuration $(draw_line $((R_WIDTH - 20)) "$H")┐"
+    local header_l="╒$(draw_line 3 "$HH") Video Configuration $(draw_line $((L_WIDTH - 22)) "$HH")"
+    local header_r="$(draw_line 1 "$HH") Audio Configuration $(draw_line $((R_WIDTH - 20)) "$HH")╕"
     log "SET" "${header_l}${TT}${header_r}"
 
     print_2col "$(printf "%-13s %s" "Source" "$val_source")" "$(printf "%-15s %s" "Audio Bitrate" "$val_abit")"
@@ -912,7 +912,7 @@ main() {
     print_2col "$(printf "%-13s %s" "Bitrate" "$val_bit")" "$val_empty_r"
 
     # Split header for Loop & Shuffle
-    local mid_r="├─ Loop & Shuffle $(draw_line $((R_WIDTH - 15)) "$H")┤"
+    local mid_r="╞$(draw_line 1 "$HH") Loop & Shuffle $(draw_line $((R_WIDTH - 15)) "$HH")╡"
     log "SET" "$V $(printf "%-13s %s" "GOP Size" "$val_gop") $mid_r"
 
     print_2col "$(printf "%-13s %s" "Buffer Size" "$val_buf")" "$(printf "%-15s %s" "Loop Enabled" "$val_loop")"
@@ -925,13 +925,13 @@ main() {
     fi
 
     # --- Draw Stream Destination ---
-    log "SET" "├─── Stream Destination $(draw_line $((L_WIDTH - 21)) "$H")┴$(draw_line $((R_WIDTH + 2)) "$H")┤"
+    log "SET" "╞$(draw_line 3 "$HH") Stream Destination $(draw_line $((L_WIDTH - 21)) "$HH")╧$(draw_line $((R_WIDTH + 2)) "$HH")╡"
     local val_url
     val_url=$(pad_str ": $TWITCH_URL" $((FULL_WIDTH - 14)))
     log "SET" "$V $(printf "%-13s %s" "URL" "$val_url") $V"
 
     # --- Draw Logging ---
-    log "SET" "├─── Logging $(draw_line $((FULL_WIDTH - 10)) "$H")┤"
+    log "SET" "╞$(draw_line 3 "$HH") Logging $(draw_line $((FULL_WIDTH - 10)) "$HH")╡"
     local val_flog
     val_flog=$(pad_str ": $FFMPEG_LOG_FILE (enabled: $ENABLE_FFMPEG_LOG_FILE)" $((FULL_WIDTH - 14)))
     local val_lvl
