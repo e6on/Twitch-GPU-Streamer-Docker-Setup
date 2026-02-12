@@ -370,6 +370,17 @@ generate_playlist() {
     local temp_file="${output_file}.tmp.$$"
     {
         find "${find_args[@]}" -print0 2>/dev/null | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do 
+            # For video files, add duration as a comment
+            if [[ "$media_type" == "Video" ]]; then
+                local duration
+                duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || echo "0")
+                # Validate and format duration
+                if [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    echo "# duration: $duration"
+                else
+                    echo "# duration: 0"
+                fi
+            fi
             echo "file '$file'"
         done
     } > "$temp_file"
@@ -503,6 +514,7 @@ monitor_ffmpeg_progress() {
     if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
 
       local file_counter_str=""
+      local file_duration=""
       if [[ -f "$VIDEO_PLAYLIST" ]]; then
         local total_files
         total_files=$(grep -c "^file " "$VIDEO_PLAYLIST" || echo 0)
@@ -510,10 +522,24 @@ monitor_ffmpeg_progress() {
         line_num=$(grep -nF "file '$current_file'" "$VIDEO_PLAYLIST" | head -n1 | cut -d: -f1 || true)
         if [[ -n "$line_num" ]]; then
           file_counter_str="[${line_num}/${total_files}]"
+          
+          # Read duration from the comment line above (line_num - 1)
+          if [[ $line_num -gt 1 ]]; then
+            local duration_line
+            duration_line=$(sed -n "$((line_num - 1))p" "$VIDEO_PLAYLIST" 2>/dev/null || true)
+            if [[ "$duration_line" =~ ^#\ duration:\ ([0-9]+(\.[0-9]+)?)$ ]]; then
+              local duration_seconds="${BASH_REMATCH[1]}"
+              file_duration=$(format_duration "$duration_seconds")
+            fi
+          fi
         fi
       fi
 
-      log "VID" "▶ #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
+      if [[ -n "$file_duration" ]]; then
+        log "VID" "▶️ #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%}) ⏱️ ${file_duration}"
+      else
+        log "VID" "▶️ #${loop_count}${file_counter_str}: $(basename "$current_file") (${progress_percent:-0.0%})"
+      fi
       last_logged_file="$current_file"
     elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
       log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
@@ -801,7 +827,7 @@ start_ffmpeg_stream() {
                     local next_line_num=$((line_num + 1))
                     local next_file_line
                     next_file_line=$(sed -n "${next_line_num}p" "$playlist_file")
-                    log "ERR" "  ->   Next: $(basename "${next_file_line#file \'}")"
+                    log "ERR" "  ->   Next: $(basename "$(echo "$next_file_line" | sed "s/^file '\(.*\)'$/\1/")")"
                 fi
             fi
         fi
