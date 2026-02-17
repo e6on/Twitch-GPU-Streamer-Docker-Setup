@@ -5,9 +5,6 @@ services:
       context: .
       dockerfile: Dockerfile
     image: twitch-gpu-streamer
-    # --- To use an image from Docker Hub ---
-    # Comment out the 'build' section above and uncomment the line below.
-    # image: e6on/twitch-gpu-streamer:latest
     container_name: twitch-gpu-streamer
     restart: always
 
@@ -54,7 +51,8 @@ services:
       # Uncomment to enable a separate, continuously looping music track over your videos.
       - ENABLE_MUSIC=true
       - MUSIC_DIR=/music
-      - MUSIC_VOLUME=1.0 # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
+      # Set music volume. 1.0 is 100%, 0.5 is 50%, 1.5 is 150%.
+      - MUSIC_VOLUME=1.0
       - MUSIC_FILE_TYPES="m4a"
 
       # --- Optional FFmpeg File Logging ---
@@ -68,37 +66,24 @@ services:
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.
       - ENABLE_SCRIPT_LOG_FILE=true
-      - LOG_LEVEL=DBG  # Show all debug messages
-      # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
+      # Show all debug messages
+      - LOG_LEVEL=DBG
+      # Optional: customize log file path
+      # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log
 
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
-      - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/ # Europe: Finland, Helsinki
+      # Europe: Finland, Helsinki
+      - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/
       - TZ=Europe/Tallinn
 
     # --- Group Permissions (for Hardware Acceleration) ---
     # Grant the container user access to the host's render/video groups for VA-API.
     # This is only needed if ENABLE_HW_ACCEL is set to "true".
     group_add:
-      - "105" # GID for the 'render' group
-      - "44" # GID for the 'video' group
-      
-    # --- Optional Resource Limits ---
-    # Uncomment to set CPU and memory limits for the container.
-    # Useful to prevent the stream from consuming all system resources.
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '2.0'      # Limit to 2 CPU cores
-    #       memory: 2G       # Limit to 2GB RAM
-    #     reservations:
-    #       cpus: '1.0'      # Reserve at least 1 CPU core
-    #       memory: 1G       # Reserve at least 1GB RAM
-
-    # --- Optional Logging Configuration ---
-    # Uncomment to use a different logging driver or limit log size.
-    # logging:
-    #   driver: "json-file"
-    #   options:
-    #     max-size: "10m"
-    #     max-file: "3"
+      # GID for the 'render' group
+      - "105"
+      # GID for the 'video' group
+      - "44"
+    env_file:
+      - .env

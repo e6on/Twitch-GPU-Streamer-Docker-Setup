@@ -45,9 +45,9 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     # Set timezone
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
     # Clean up apt caches
-    rm -rf /var/lib/apt/lists/* && \
     apt-get autoremove -y && \
-    apt-get autoclean
+    apt-get autoclean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the extracted ffmpeg binaries from the build stage.
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg

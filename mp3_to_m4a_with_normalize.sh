@@ -18,6 +18,8 @@ OUT_BR="${OUT_BR:-64k}"                # Bitrate (e.g., 64k/96k/128k)
 # Source extensions to include (space-separated)
 GLOB_EXT="${GLOB_EXT:-mp3}"
 
+MAX_JOBS="${MAX_JOBS:-4}"   # number of parallel ffmpeg jobs
+
 # -------------------- PREP & CHECKS -----------------
 mkdir -p "$OUT_DIR"
 
@@ -100,9 +102,17 @@ norm_one() {
   echo "  ✓ Normalized (two-pass) → $out"
 }
 
+# Parallel job pool:
+job_count=0
 for f in "${FILES[@]}"; do
-  norm_one "$f"
+  norm_one "$f" &
+  job_count=$(( job_count + 1 ))
+  if (( job_count >= MAX_JOBS )); then
+    wait -n 2>/dev/null || wait   # wait for any one job to finish
+    job_count=$(( job_count - 1 ))
+  fi
 done
+wait   # drain remaining jobs
 
 echo
 echo "✓ All files normalized to: $OUT_DIR"

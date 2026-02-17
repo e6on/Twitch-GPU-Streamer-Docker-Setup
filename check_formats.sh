@@ -70,9 +70,8 @@ find_args+=(\))
 TMP_FILE=$(mktemp)
 TMP_FILE_RES=$(mktemp)
 TMP_FILE_FPS=$(mktemp)
-trap 'rm -f "$TMP_FILE"' EXIT # Ensure temp file is cleaned up on exit
-trap 'rm -f "$TMP_FILE_RES"' EXIT
-trap 'rm -f "$TMP_FILE_FPS"' EXIT
+# Ensure temp file is cleaned up on exit
+trap 'rm -f "$TMP_FILE" "$TMP_FILE_RES" "$TMP_FILE_FPS"' EXIT
 
 find "${find_args[@]}" -print0 | while IFS= read -r -d '' file; do
     # Use a single ffprobe call for efficiency

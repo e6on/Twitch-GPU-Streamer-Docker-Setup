@@ -92,6 +92,7 @@ STREAM_RESOLUTION="${STREAM_RESOLUTION:-1280x720}"
 STREAM_FRAMERATE="${STREAM_FRAMERATE:-30}"
 VIDEO_BITRATE="${VIDEO_BITRATE:-2500k}"
 AUDIO_BITRATE="${AUDIO_BITRATE:-64k}"
+AUDIO_SAMPLE_RATE="${AUDIO_SAMPLE_RATE:-44100}"
 
 # Calculate GOP size for a 2-second keyframe interval, as recommended by Twitch.
 GOP_SIZE=$(awk -v fps="$STREAM_FRAMERATE" 'BEGIN { printf "%.0f", fps * 2 }')
@@ -821,7 +822,7 @@ build_audio_and_filter_args() {
                 # Adjust music volume and map video and adjusted music audio
                 args+=(-filter_complex "[1:a]volume=${music_volume},asetpts=PTS-STARTPTS[aud]" -map 0:v -map "[aud]")
             fi
-            args+=(-c:a aac -ar 44100 -b:a "${audio_bitrate}")
+            args+=(-c:a aac -ar "${AUDIO_SAMPLE_RATE}" -b:a "${audio_bitrate}")
         fi
         args+=(-shortest) # End stream when the video playlist finishes
     else
@@ -842,11 +843,11 @@ build_audio_and_filter_args() {
         else
             log "WAR" "Video has no audio stream. Encoding silent audio."
             if [[ "$use_video_filter" == "true" ]]; then
-                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];anullsrc=r=44100:cl=stereo[aud]" -map "[vout]" -map "[aud]")
+                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo[aud]" -map "[vout]" -map "[aud]")
             else
-                args+=(-f lavfi -i anullsrc=r=44100:cl=stereo -map 0:v -map 1:a)
+                args+=(-f lavfi -i "anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo" -map 0:v -map 1:a)
             fi
-            args+=(-c:a aac -ar 44100 -b:a "${audio_bitrate}")
+            args+=(-c:a aac -ar "${AUDIO_SAMPLE_RATE}" -ac 2 -b:a "${audio_bitrate}")
         fi
     fi
 
@@ -880,13 +881,17 @@ build_codec_args() {
         args+=(
              -c:v libx264                   # Use software x264 encoder
              -preset veryfast               # Use veryfast preset for low latency
+             -tune zerolatency              # Reduce encoder buffer latency, good for live streams
+             -profile:v high                # High profile (matches VA-API branch for consistency)
              -r "${STREAM_FRAMERATE}"       # Set frame rate
              -fps_mode cfr                  # Constant frame rate
+             -b:v "${VIDEO_BITRATE}"        # Target bitrate
              -minrate "${VIDEO_BITRATE}"    # Set minimum bitrate
              -maxrate "${VIDEO_BITRATE}"    # Set maximum bitrate
              -bufsize "${BUFSIZE}"          # Set buffer size
              -g "${GOP_SIZE}"               # Set GOP size
              -keyint_min "${GOP_SIZE}"      # Set minimum GOP size
+             -sc_threshold 0                # Disable scene-change detection so GOP stays fixed
              )
     fi
     CODEC_ARGS=("${args[@]}")
