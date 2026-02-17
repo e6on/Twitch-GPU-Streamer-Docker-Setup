@@ -4,7 +4,9 @@
 FROM debian:bookworm-slim AS builder
 
 # Install the extraction tool
-RUN apt-get update && apt-get install -y --no-install-recommends xz-utils
+RUN apt-get update && \
+    apt-get dist-upgrade -y && \
+    apt-get install -y --no-install-recommends xz-utils
 
 # Copy and extract the ffmpeg archive
 #COPY ffmpeg-master-latest-linux64-gpl.tar.xz /tmp/
@@ -30,26 +32,22 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     # Bash is used by the entrypoint script
     bash \
     progress \
+    vainfo \
     # Runtime libs for VA-API hardware acceleration
     libva2 \
     libva-drm2 \
     libdrm2 \
     # Intel's non-free VA-API driver, often required for hardware encoding/decoding.
     intel-media-va-driver-non-free \
-    # Script dependencies
-    #inotify-tools \
-    #procps \
-    #psmisc \
-    #lsof \
     # Timezone data
     tzdata \
     ca-certificates && \
-    \
     # Set timezone
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    \
     # Clean up apt caches
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    apt-get autoremove -y && \
+    apt-get autoclean
 
 # Copy the extracted ffmpeg binaries from the build stage.
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg

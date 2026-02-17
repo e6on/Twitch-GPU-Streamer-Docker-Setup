@@ -34,7 +34,7 @@ services:
       - ENABLE_HW_ACCEL=true
       - VAAPI_DEVICE=/dev/dri/renderD128
       # Uncomment and adjust these to change stream quality.
-      - USE_VIDEO_FILTER=false
+      - USE_VIDEO_FILTER=true
       - STREAM_RESOLUTION=1280x720
       - STREAM_FRAMERATE=30
       - VIDEO_BITRATE=2500k
@@ -68,6 +68,7 @@ services:
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.
       - ENABLE_SCRIPT_LOG_FILE=true
+      - LOG_LEVEL=DBG  # Show all debug messages
       # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log # Optional: customize log file path
 
       # --- Optional Ingest Server ---
