@@ -138,7 +138,10 @@ if [[ "$ENABLE_HW_ACCEL" == "true" && -e "$VAAPI_DEVICE" ]]; then
     VAAPI_OPTS=(
         -hwaccel vaapi                  # Uses the VAAPI (Video Acceleration API) hardware acceleration for decoding the input video.
         -vaapi_device "$VAAPI_DEVICE"   # Specifies the VAAPI device to use.
-        -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder to VAAPI.
+        -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder.
+        -extra_hw_frames 10             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures
+                                        # when switching between files in concat. If the crash still happens occasionally,
+                                        # bump -extra_hw_frames to 20 or 32.
     )
     USE_HWACCEL=true
 else
@@ -152,7 +155,7 @@ fi
 # format=nv12 on the upload step pins the surface format so scale_vaapi has a
 # known pixel format to work with on every input file regardless of source format.
 if [[ "$USE_HWACCEL" == "true" ]]; then
-    VIDEO_FILTER="format=nv12|vaapi,hwupload,scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12" # VAAPI scaling
+    VIDEO_FILTER="scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12" # VAAPI scaling
 else
     VIDEO_FILTER="scale=${STREAM_RESOLUTION%x*}:${STREAM_RESOLUTION#*x}:flags=lanczos" # Software scaling
 fi
