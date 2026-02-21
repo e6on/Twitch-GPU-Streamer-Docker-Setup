@@ -139,7 +139,7 @@ if [[ "$ENABLE_HW_ACCEL" == "true" && -e "$VAAPI_DEVICE" ]]; then
         -hwaccel vaapi                  # Uses the VAAPI (Video Acceleration API) hardware acceleration for decoding the input video.
         -vaapi_device "$VAAPI_DEVICE"   # Specifies the VAAPI device to use.
         -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder.
-        -extra_hw_frames 10             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures
+        -extra_hw_frames 32             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures
                                         # when switching between files in concat. If the crash still happens occasionally,
                                         # bump -extra_hw_frames to 20 or 32.
     )
@@ -981,14 +981,14 @@ start_ffmpeg_stream() {
         cmd+=(-loglevel "${log_level}") # Set ffmpeg log level
         local cmd_str
         cmd_str=$(format_cmd_for_log "${cmd[@]}")
-        log "VID" "Executing FFmpeg command (logging to ${FFMPEG_LOG_FILE}): ${cmd_str}"
+        log_debug "Executing FFmpeg command (logging to ${FFMPEG_LOG_FILE}): ${cmd_str}"
         # Run ffmpeg in the background to get its PID, redirecting logs to a file.
         "${cmd[@]}" >> "$FFMPEG_LOG_FILE" 2>&1 &
     else
         cmd+=(-loglevel warning) # Set ffmpeg log level
         local cmd_str
         cmd_str=$(format_cmd_for_log "${cmd[@]}")
-        log "VID" "Executing FFmpeg command: ${cmd_str}"
+        log_debug "Executing FFmpeg command: ${cmd_str}"
         # If script logging is enabled, pipe ffmpeg's stderr through `tee` to
         # simultaneously print to the console and append to the script log file.
         # Otherwise, just run ffmpeg and let its stderr go to the console directly.
