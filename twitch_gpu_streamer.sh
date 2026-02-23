@@ -139,9 +139,9 @@ if [[ "$ENABLE_HW_ACCEL" == "true" && -e "$VAAPI_DEVICE" ]]; then
         -hwaccel vaapi                  # Uses the VAAPI (Video Acceleration API) hardware acceleration for decoding the input video.
         -vaapi_device "$VAAPI_DEVICE"   # Specifies the VAAPI device to use.
         -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder.
-        -extra_hw_frames 32             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures
-                                        # when switching between files in concat. If the crash still happens occasionally,
-                                        # bump -extra_hw_frames to 20 or 32.
+        -extra_hw_frames 32             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures when switching between files in concat. If the crash still happens occasionally, bump -extra_hw_frames to 20 or 32.
+        -probesize 50M                  # More thorough format detection
+        -analyzeduration 50M            # Spend more time analyzing input streams
     )
     USE_HWACCEL=true
 else
@@ -866,7 +866,9 @@ build_codec_args() {
         args+=(
              -c:v h264_vaapi                # Use VAAPI H.264 encoder
              -profile:v high                # High profile for better quality
-             -idr_interval 1                # Insert IDR frames at every keyframe
+             #-idr_interval 1                # Insert IDR frames at every keyframe
+             -compression_level 1           # Lower = better quality, more GPU work (0-7, default 4)
+             -quality 1                     # VAAPI quality hint, lower = better
              -aud 1                         # Insert Access Unit Delimiter
              -sei timing+recovery_point     # Insert SEI messages for timing and recovery points
              -async_depth 4                 # Audio sync depth
