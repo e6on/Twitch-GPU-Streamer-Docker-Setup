@@ -1,7 +1,7 @@
 # --- Build Stage ---
 # This stage is only used to extract the ffmpeg binary from its archive.
 # Its contents will be discarded and will not be part of the final image.
-FROM debian:bookworm-slim AS builder
+FROM debian:trixie-slim AS builder
 
 # Install the extraction tool
 RUN apt-get update && \
@@ -18,7 +18,7 @@ RUN tar -xf /tmp/ffmpeg-n8.0.1-64-g15504610b0-linux64-gpl-8.0.tar.xz -C /usr/loc
 
 # --- Final Stage ---
 # This is the final, optimized image that will be used.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Set shell to bash and ensure commands exit on error.
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
