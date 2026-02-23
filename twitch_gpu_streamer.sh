@@ -966,6 +966,7 @@ start_ffmpeg_stream() {
     cmd+=(
          -max_muxing_queue_size 4096        # Increase muxing queue size to prevent buffer overflows
          -rw_timeout 15000000               # Set RTMP timeout to 15 seconds (in microseconds)
+         -noautoscale                       # Disable automatic scaling of output dimensions
          -flvflags no_duration_filesize     # Do not include duration/filesize metadata in FLV
          -rtmp_live live                    # Set RTMP live mode
          -f flv "$TWITCH_URL/$STREAM_KEY"   # Output to Twitch RTMP URL
