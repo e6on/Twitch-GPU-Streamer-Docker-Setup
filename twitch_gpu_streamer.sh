@@ -559,22 +559,33 @@ generate_playlist() {
     # Write to temp file first, then move to avoid empty file overwrites
     local temp_file="${output_file}.tmp.$$"
     {
-        find "${find_args[@]}" -print0 2>/dev/null | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do 
-            # For video files, add duration as a comment on the same line
-            if [[ "$media_type" == "Video" ]]; then
-                local duration
-                duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || echo "0")
-                # Validate and format duration
-                if [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-                    echo "file '$file' # duration: $duration"
-                else
-                    echo "file '$file' # duration: 0"
-                fi
-            else
+        if [[ "$media_type" == "Video" ]]; then
+        # Probe all files in parallel for speed, then sort/shuffle the results
+        local probe_tmp
+        probe_tmp=$(mktemp)
+        find "${find_args[@]}" -print0 2>/dev/null \
+            | xargs -0 -P 16 -n 1 bash -c '
+                file="$1"
+                duration=$(ffprobe -v error \
+                    -probesize 1M \
+                    -analyzeduration 0 \
+                    -show_entries format=duration \
+                    -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || echo "0")
+                [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || duration="0"
+                printf "file '\''%s'\'' # duration: %s\n" "$file" "$duration"
+            ' --  >> "$probe_tmp"
+        if [[ "${ENABLE_SHUFFLE:-false}" == "true" ]]; then
+            shuf "$probe_tmp" > "$temp_file"
+        else
+            sort "$probe_tmp" > "$temp_file"
+        fi
+        rm -f "$probe_tmp"
+        else
+            find "${find_args[@]}" -print0 2>/dev/null | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do
                 echo "file '$file'"
-            fi
-        done
-    } > "$temp_file"
+            done > "$temp_file"
+        fi
+    }
 
     # Move temp file to final location (atomic operation)
     mv "$temp_file" "$output_file" 2>/dev/null || true
