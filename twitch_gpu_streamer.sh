@@ -412,15 +412,15 @@ get_playlist_duration() {
     
     # Generate cache key based on source directory and file count
     local cache_key
-    cache_key=$(echo "${source_dir}:${file_count}" | md5sum 2>/dev/null | cut -d' ' -f1 || echo "${source_dir}_${file_count}")
-    
+    cache_key="${source_dir//[:\/ ]/_}_${file_count}"
+
     # Try to retrieve from cache
     if [[ "$use_cache" == "true" && -f "$DURATION_CACHE" ]]; then
         local cached_line
-        cached_line=$(grep "^${cache_key}:" "$DURATION_CACHE" 2>/dev/null | grep " ${file_count}$" || true)
+        cached_line=$(grep "^${cache_key}:" "$DURATION_CACHE" 2>/dev/null | tail -n1 || true)
         if [[ -n "$cached_line" ]]; then
             log_debug "Cache hit for $(basename "$source_dir") (${file_count} files)"
-            echo "$cached_line" | cut -d':' -f2-
+            echo "${cached_line#*:}"
             return
         fi
     fi
@@ -735,12 +735,12 @@ monitor_ffmpeg_progress() {
     file_ext_regex="$(printf '%s\n' "$sanitized_types" | paste -sd'|' -)"
 
     # Monitor loop with reduced overhead
-    while pidof -x ffmpeg >/dev/null 2>&1; do
+    while kill -0 "$FFMPEG_PID" 2>/dev/null; do
         # Take a snapshot; don't let a transient error kill the loop
         local output
         output="$(progress -c ffmpeg -q 2>/dev/null || true)"
         if [[ -z "$output" ]]; then
-            sleep 2
+            sleep 1
             continue
         fi
 
@@ -796,14 +796,6 @@ monitor_ffmpeg_progress() {
 # AUDIO AND VIDEO CONFIGURATION
 # ============================================================================
 
-# Helper to check if video has audio stream
-has_audio_stream() {
-    local video_file="$1"
-    local audio_streams
-    audio_streams=$(ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "$video_file" 2>/dev/null | wc -l)
-    [[ $audio_streams -gt 0 ]]
-}
-
 # Helper to build audio and filter arguments
 build_audio_and_filter_args() {
     local use_video_filter="${1}"
@@ -841,28 +833,13 @@ build_audio_and_filter_args() {
         args+=(-shortest) # End stream when the video playlist finishes
     else
         log "VID" "Music is disabled. Using video audio directly. Video filter: ${use_video_filter}"
-        # Check if the first video has audio before copying
-        local first_video
-        first_video=$(grep -m1 "^file " "$VIDEO_PLAYLIST" | sed "s/^file '\(.*\)'/\1/" || true)
-
-        if [[ -n "$first_video" ]] && has_audio_stream "$first_video"; then
-            log "VID" "Copying audio stream without re-encoding (-c:a copy)."
-            if [[ "$use_video_filter" == "true" ]]; then
-                # Apply video filter and map filtered video and original audio
-                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "0:a?")
-            else
-                args+=(-map 0:v -map "0:a?") # Map video and audio directly (? makes it optional)
-            fi
-            args+=(-c:a copy)
+        log "VID" "Copying audio stream without re-encoding (-c:a copy)."
+        if [[ "$use_video_filter" == "true" ]]; then
+            args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout]" -map "[vout]" -map "0:a?")
         else
-            log "WAR" "Video has no audio stream. Encoding silent audio."
-            if [[ "$use_video_filter" == "true" ]]; then
-                args+=(-filter_complex "[0:v]${VIDEO_FILTER}[vout];anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo[aud]" -map "[vout]" -map "[aud]")
-            else
-                args+=(-f lavfi -i "anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=stereo" -map 0:v -map 1:a)
-            fi
-            args+=(-c:a aac -ar "${AUDIO_SAMPLE_RATE}" -ac 2 -b:a "${audio_bitrate}")
+            args+=(-map 0:v -map "0:a?")
         fi
+        args+=(-c:a copy)
     fi
 
     AUDIO_ARGS=("${args[@]}")
@@ -1109,45 +1086,58 @@ gather_system_info() {
         sys_info[cpu]="unknown"
     fi
     
-    # GPU Detection (VA-API)
-    if [[ -e "$VAAPI_DEVICE" ]] && command -v vainfo &> /dev/null; then
-        local vainfo_output=$(vainfo --display drm --device "$VAAPI_DEVICE" 2>&1 || true)
-        
-        # Extract VA-API version
-        local vaapi_line=$(echo "$vainfo_output" | grep -i "VA-API version:" | head -n1 || echo "")
-        sys_info[vaapi]=$(echo "$vaapi_line" | sed 's/.*VA-API version: //' | sed 's/^[ \t]*//')
+    # Run slow external commands in parallel using temp files
+    local tmp_vainfo tmp_ffmpeg tmp_ffprobe tmp_progress
+    tmp_vainfo=$(mktemp)
+    tmp_ffmpeg=$(mktemp)
+    tmp_ffprobe=$(mktemp)
+    tmp_progress=$(mktemp)
 
-        # Extract Driver version
-        local driver_line=$(echo "$vainfo_output" | grep -i "Driver version:" | head -n1 || echo "")
+    # Launch all in background simultaneously
+    # GPU Detection (VA-API)
+    { vainfo --display drm --device "$VAAPI_DEVICE" 2>&1 || true; } > "$tmp_vainfo" &
+    local pid_vainfo=$!
+    # FFmpeg version
+    { ffmpeg -version 2>/dev/null | head -n1 || true; } > "$tmp_ffmpeg" &
+    local pid_ffmpeg=$!
+    # FFprobe version
+    { ffprobe -version 2>/dev/null | head -n1 || true; } > "$tmp_ffprobe" &
+    local pid_ffprobe=$!
+    # Progress command version
+    { progress -v 2>/dev/null | head -n1 || true; } > "$tmp_progress" &
+    local pid_progress=$!
+
+    # Wait for all to finish
+    wait $pid_vainfo $pid_ffmpeg $pid_ffprobe $pid_progress
+
+    # Parse vainfo output
+    if [[ -e "$VAAPI_DEVICE" ]] && command -v vainfo &> /dev/null; then
+        local vainfo_output
+        vainfo_output=$(<"$tmp_vainfo")
+        local vaapi_line driver_line
+        vaapi_line=$(echo "$vainfo_output" | grep -i "VA-API version:" | head -n1 || echo "")
+        driver_line=$(echo "$vainfo_output" | grep -i "Driver version:" | head -n1 || echo "")
+        sys_info[vaapi]=$(echo "$vaapi_line" | sed 's/.*VA-API version: //' | sed 's/^[ \t]*//')
         sys_info[driver]=$(echo "$driver_line" | sed 's/.*Driver version: //' | sed 's/^[ \t]*//' | sed 's/ ()$//')
     else
         sys_info[vaapi]="not detected"
         sys_info[driver]="not detected"
     fi
-    
+
     [[ -z "${sys_info[vaapi]}" ]] && sys_info[vaapi]="unknown"
     [[ -z "${sys_info[driver]}" ]] && sys_info[driver]="unknown"
-    
-    # FFmpeg version
-    if command -v ffmpeg &> /dev/null; then
-        sys_info[ffmpeg]=$(ffmpeg -version 2>/dev/null | head -n1 | sed 's/ffmpeg version //' | awk '{print $1}' || echo "unknown")
-    else
-        sys_info[ffmpeg]="not installed"
-    fi
-    
-    # FFprobe version
-    if command -v ffprobe &> /dev/null; then
-        sys_info[ffprobe]=$(ffprobe -version 2>/dev/null | head -n1 | sed 's/ffprobe version //' | awk '{print $1}' || echo "unknown")
-    else
-        sys_info[ffprobe]="not installed"
-    fi
-    
-    # Progress command version
-    if command -v progress &> /dev/null; then
-        sys_info[progress]=$(progress -v 2>/dev/null | head -n1 | sed 's/progress version //' | awk '{print $1}' || echo "unknown")
-    else
-        sys_info[progress]="not installed"
-    fi
+
+    # Parse version outputs
+    sys_info[ffmpeg]=$(awk '{print $3}' "$tmp_ffmpeg" 2>/dev/null || echo "unknown")
+    sys_info[ffprobe]=$(awk '{print $3}' "$tmp_ffprobe" 2>/dev/null || echo "unknown")
+    sys_info[progress]=$(awk '{print $3}' "$tmp_progress" 2>/dev/null || echo "unknown")
+
+    [[ -z "${sys_info[ffmpeg]}" ]]   && sys_info[ffmpeg]="not installed"
+    [[ -z "${sys_info[ffprobe]}" ]]  && sys_info[ffprobe]="not installed"
+    [[ -z "${sys_info[progress]}" ]] && sys_info[progress]="not installed"
+
+    # Cleanup temp files
+    rm -f "$tmp_vainfo" "$tmp_ffmpeg" "$tmp_ffprobe" "$tmp_progress"
     
     # Return associative array as serialized string
     for key in "${!sys_info[@]}"; do
