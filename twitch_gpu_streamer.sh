@@ -658,22 +658,13 @@ generate_videolist() {
 parse_progress_output() {
     local output="$1"
     local file_ext_regex="$2"
+    local current_file="" progress_percent=""
 
-    # Filter out the concatenated music file
-    local filtered_output
-    filtered_output="$(echo "$output" | grep -v -- "$CONCAT_MUSIC_FILE" || true)"
-
-    # Extract filename (best-effort)
-    local current_file
-    current_file="$(echo "$filtered_output" \
-      | grep -Eo "(/|\.\/)?[^[:space:]]+\.(${file_ext_regex})" \
-      | head -n 1 || true)"
-
-    # Extract percent (best-effort)
-    local progress_percent
-    progress_percent="$(echo "$output" \
-      | grep -Eo '[0-9]+(\.[0-9]+)?%' \
-      | head -n 1 || true)"
+    while IFS= read -r line; do
+        [[ "$line" == *"$CONCAT_MUSIC_FILE"* ]] && continue
+        [[ -z "$current_file" && "$line" =~ (/|\./)?[^[:space:]]+\.(${file_ext_regex}) ]] && current_file="${BASH_REMATCH[0]}"
+        [[ -z "$progress_percent" && "$line" =~ [0-9]+(\.[0-9]+)?% ]] && progress_percent="${BASH_REMATCH[0]}"
+    done <<< "$output"
 
     echo "$current_file|$progress_percent"
 }
