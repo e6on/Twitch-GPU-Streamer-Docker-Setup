@@ -749,7 +749,7 @@ monitor_ffmpeg_progress() {
     trap persist_last_played EXIT TERM INT
 
     # Give ffmpeg a moment to start and open a file before we start monitoring
-    sleep 1
+    sleep 0.5
 
     # Pre-calculate file extension regex once
     local sanitized_types="${VIDEO_FILE_TYPES%\"}"
@@ -765,7 +765,7 @@ monitor_ffmpeg_progress() {
         local output
         output="$(progress -c ffmpeg -q 2>/dev/null || true)"
         if [[ -z "$output" ]]; then
-            sleep 1
+            sleep 0.5
             continue
         fi
 
@@ -806,7 +806,7 @@ monitor_ffmpeg_progress() {
             log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
         fi
 
-        sleep 1
+        sleep 0.5
     done
 
     # Final persistence
