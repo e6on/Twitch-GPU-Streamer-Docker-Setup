@@ -21,6 +21,10 @@ LOOP_COUNT=0
 # Performance metrics
 STREAM_START_TIME=""
 
+# Playlist index (built once after playlist generation, avoids repeated awk scans)
+declare -A PLAYLIST_INDEX    # filepath -> "line_num total"
+declare -A PLAYLIST_DURATION # filepath -> duration_seconds
+
 # ============================================================================
 # LOGGING CONFIGURATION
 # ============================================================================
@@ -508,6 +512,63 @@ get_playlist_duration() {
 }
 
 # ============================================================================
+# PLAYLIST INDEX
+# ============================================================================
+
+# Build an in-memory index of the playlist for O(1) lookups during monitoring.
+# Must be called after generate_videolist (and again after shuffle regeneration).
+build_playlist_index() {
+    local playlist_file="$1"
+
+    # Clear existing index so stale entries from a previous loop don't linger
+    unset PLAYLIST_INDEX
+    unset PLAYLIST_DURATION
+    declare -gA PLAYLIST_INDEX
+    declare -gA PLAYLIST_DURATION
+
+    if [[ ! -f "$playlist_file" ]]; then
+        log "WAR" "build_playlist_index: playlist file not found: $playlist_file"
+        return
+    fi
+
+    local line_num=0
+    local total
+    total=$(grep -c "^file " "$playlist_file" 2>/dev/null || echo 0)
+
+    while IFS= read -r line; do
+        # Match lines like: file '/path/to/file.mp4' # duration: 123.456
+        if [[ "$line" =~ ^file\ \'([^\']+)\' ]]; then
+            line_num=$((line_num + 1))
+            local filepath="${BASH_REMATCH[1]}"
+            PLAYLIST_INDEX["$filepath"]="${line_num} ${total}"
+
+            # Extract duration comment if present
+            if [[ "$line" =~ \#\ duration:\ ([0-9.]+) ]]; then
+                PLAYLIST_DURATION["$filepath"]="${BASH_REMATCH[1]}"
+            fi
+        fi
+    done < "$playlist_file"
+
+    log_debug "Playlist index built: ${line_num} entries"
+}
+
+# O(1) lookup for file info from the in-memory index
+# Returns: "line_num total duration" (duration may be empty)
+get_file_info_from_playlist() {
+    local current_file="$1"
+    # Second argument (playlist_file) kept for API compatibility but no longer used.
+
+    local index_entry="${PLAYLIST_INDEX[$current_file]:-}"
+    if [[ -z "$index_entry" ]]; then
+        # Not found in index — return empty so callers behave as before
+        return
+    fi
+
+    local duration="${PLAYLIST_DURATION[$current_file]:-}"
+    echo "${index_entry} ${duration}"
+}
+
+# ============================================================================
 # PLAYLIST GENERATION
 # ============================================================================
 
@@ -648,6 +709,9 @@ generate_videolist() {
         rm -f "${VIDEO_PLAYLIST}"
         exit 4
     fi
+
+    # Build in-memory index for O(1) lookups during monitoring
+    build_playlist_index "$VIDEO_PLAYLIST"
 }
 
 # ============================================================================
@@ -669,36 +733,6 @@ parse_progress_output() {
     echo "$current_file|$progress_percent"
 }
 
-# Get file info from playlist (avoids repeated grep)
-get_file_info_from_playlist() {
-    local current_file="$1"
-    local playlist_file="$2"
-    
-    # Use awk for single-pass parsing (compatible with mawk and gawk)
-    awk -v target="$current_file" '
-        BEGIN { line_num = 0; total = 0; found = 0; duration = "" }
-        /^file / { 
-            total++; 
-            if ($0 ~ target) { 
-                line_num = total; 
-                found = 1;
-                # Extract duration from comment using sub/gsub
-                if ($0 ~ /# duration: [0-9.]+/) {
-                    temp = $0;
-                    sub(/.*# duration: /, "", temp);
-                    sub(/ .*/, "", temp);
-                    duration = temp;
-                }
-            }
-        }
-        END { 
-            if (found) {
-                print line_num " " total " " duration;
-            }
-        }
-    ' "$playlist_file"
-}
-
 # Function to monitor ffmpeg using the 'progress' command in the background
 monitor_ffmpeg_progress() {
     local last_logged_file=""
@@ -715,7 +749,7 @@ monitor_ffmpeg_progress() {
     trap persist_last_played EXIT TERM INT
 
     # Give ffmpeg a moment to start and open a file before we start monitoring
-    sleep 3
+    sleep 1
 
     # Pre-calculate file extension regex once
     local sanitized_types="${VIDEO_FILE_TYPES%\"}"
@@ -742,9 +776,9 @@ monitor_ffmpeg_progress() {
         local progress_percent="${result##*|}"
 
         if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
-            # Optimized: Get all file info in one call
+            # O(1) index lookup — no awk scan of the full playlist file
             local file_info
-            file_info=$(get_file_info_from_playlist "$current_file" "$VIDEO_PLAYLIST")
+            file_info=$(get_file_info_from_playlist "$current_file")
             
             if [[ -n "$file_info" ]]; then
                 read -r line_num total_files duration <<< "$file_info"
@@ -1016,9 +1050,9 @@ start_ffmpeg_stream() {
         # If we know the last file, log its context in the playlist
         if [[ -n "$last_played_file" ]]; then
             local playlist_file="$1"
-            # Use optimized function to get file info
+            # O(1) index lookup for post-stream reporting
             local file_info
-            file_info=$(get_file_info_from_playlist "$last_played_file" "$playlist_file")
+            file_info=$(get_file_info_from_playlist "$last_played_file")
             
             if [[ -n "$file_info" ]]; then
                 read -r line_num total_files duration <<< "$file_info"
@@ -1322,7 +1356,7 @@ main() {
     # Display system and stream configuration
     display_configuration
 
-    # Initial wait for the video playlist to be generated
+    # Generate initial video playlist and build its in-memory index
     generate_videolist
 
     # Main stream loop
@@ -1351,9 +1385,10 @@ main() {
             log "WAR" "  Session uptime: $(format_duration "$_elapsed") (since ${_started})"
         fi
 
-        # If shuffle is enabled, regenerate the video playlist on each loop.
+        # If shuffle is enabled, regenerate the video playlist on each loop
+        # and rebuild the index so lookups stay accurate for the new order.
         if [[ "${ENABLE_SHUFFLE:-false}" == "true" && $LOOP_COUNT -gt 1 ]]; then
-            generate_videolist
+            generate_videolist  # calls build_playlist_index internally
         fi
 
         # Generate/Shuffle Music Playlist
