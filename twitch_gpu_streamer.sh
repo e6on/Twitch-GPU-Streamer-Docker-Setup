@@ -63,7 +63,7 @@ TWITCH_URL="${TWITCH_INGEST_URL:-rtmp://live.twitch.tv/app}"
 # Remove trailing slash from TWITCH_URL if it exists to prevent double slashes
 TWITCH_URL="${TWITCH_URL%/}"
 # Twitch stream key should be set via TWITCH_STREAM_KEY (loaded from the .env file in compose)
-STREAM_KEY="${TWITCH_STREAM_KEY:-}" 
+STREAM_KEY="${TWITCH_STREAM_KEY:-}"
 
 # Logging: allow customizing script log file and enable ffmpeg log separately
 LOG_DIR="${LOG_DIR:-/data}"
@@ -127,6 +127,18 @@ DURATION_CACHE="${LOG_DIR}/duration_cache.txt"
 LAST_PLAYED_FILE="${LOG_DIR}/last_played.txt"
 STREAM_STATE_FILE="${LOG_DIR}/stream_state.json"
 
+# --- Twitch online check via streamlink ---
+# Set TWITCH_CHANNEL in docker-compose.yaml or .env to enable.
+# e.g. TWITCH_CHANNEL=egon_p
+TWITCH_CHANNEL="${TWITCH_CHANNEL:-}"
+# How many seconds after ffmpeg starts before the first online check.
+# Twitch HLS takes ~20s to appear publicly after stream starts.
+TWITCH_CHECK_INITIAL_DELAY="${TWITCH_CHECK_INITIAL_DELAY:-30}"
+# How often (seconds) to re-check while streaming.
+TWITCH_CHECK_INTERVAL="${TWITCH_CHECK_INTERVAL:-60}"
+# How many consecutive offline results before we kill ffmpeg and restart.
+TWITCH_OFFLINE_THRESHOLD="${TWITCH_OFFLINE_THRESHOLD:-3}"
+
 # FFmpeg resilience/options and basic flags
 FFMPEG_OPTS=(
     -nostdin                         # Disable interaction on standard input. Essential for background tasks.
@@ -143,7 +155,7 @@ if [[ "$ENABLE_HW_ACCEL" == "true" && -e "$VAAPI_DEVICE" ]]; then
         -hwaccel vaapi                  # Uses the VAAPI (Video Acceleration API) hardware acceleration for decoding the input video.
         -vaapi_device "$VAAPI_DEVICE"   # Specifies the VAAPI device to use.
         -hwaccel_output_format vaapi    # Sets the output pixel format of the hardware-accelerated decoder.
-        -extra_hw_frames 32             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures when switching between files in concat. If the crash still happens occasionally, bump -extra_hw_frames to 20 or 32.
+        -extra_hw_frames 48             # Extra VAAPI surface buffers to prevent filter graph reinitialization failures when switching between files in concat.
         -probesize 50M                  # More thorough format detection
         -analyzeduration 50M            # Spend more time analyzing input streams
     )
@@ -153,17 +165,12 @@ else
 fi
 
 # Create a scaled filter for the chosen encoder.
-# For VA-API we must explicitly upload system-memory frames to GPU surfaces with
-# hwupload before calling scale_vaapi, otherwise FFmpeg cannot bridge the format
-# gap between the software decoder output and the hardware scaler input.
-# format=nv12 on the upload step pins the surface format so scale_vaapi has a
-# known pixel format to work with on every input file regardless of source format.
 if [[ "$USE_HWACCEL" == "true" ]]; then
     VIDEO_FILTER="scale_vaapi=w=${STREAM_RESOLUTION%x*}:h=${STREAM_RESOLUTION#*x}:format=nv12" # VAAPI scaling
 else
     VIDEO_FILTER="scale=${STREAM_RESOLUTION%x*}:${STREAM_RESOLUTION#*x}:flags=lanczos" # Software scaling
 fi
-# Decide if a video filter should be used. For now, this is always true if a filter is defined.
+# Decide if a video filter should be used.
 USE_VIDEO_FILTER="${USE_VIDEO_FILTER:-true}"
 
 # ============================================================================
@@ -175,13 +182,13 @@ log() {
     local level="$1"
     local message="$2"
     local no_newline_flag="${3:-}" # Optional: -n to suppress newline. Default to empty string.
-    
+
     # Check if this log level should be printed
     local level_value=${LOG_LEVEL_VALUES[$level]:-1}
     if [[ $level_value -lt $CURRENT_LOG_LEVEL_VALUE ]]; then
         return 0
     fi
-    
+
     local timestamp
     local color="${NC}"
     timestamp=$(date +"%Y-%m-%d %H:%M:%S")
@@ -197,20 +204,13 @@ log() {
     esac
 
     if [[ "$no_newline_flag" == "-n" ]]; then
-        # Construct the full string first, then print it with printf.
-        # This prevents the '%' in the progress from being interpreted as a format specifier.
-        # We use a newline to force the output buffer to flush, then use an ANSI escape
-        # code `\e[1A` to move the cursor back up one line. This is more reliable
-        # than just using a carriage return `\r` in some terminal environments.
         >&2 printf "\r\e[K%b\n\e[1A" "${color}${timestamp} [${level}] ${message}${NC}"
-        # Do not write these transient progress updates to the file log to keep it clean.
     else
         # Log to stderr for colored console output (with newline)
         >&2 echo -e "${color}${timestamp} [${level}] ${message}${NC}"
 
         # Log to file if enabled, without color codes
         if [[ "${ENABLE_SCRIPT_LOG_FILE}" == "true" ]]; then
-            # Ensure a newline is printed if the previous line was a progress update
             echo "${timestamp} [${level}] ${message}" >> "${SCRIPT_LOG_FILE}"
         fi
     fi
@@ -322,8 +322,6 @@ save_stream_state() {
     local current_time=$(date +%s)
 
     # The monitor subprocess writes the last-played path to LAST_PLAYED_FILE.
-    # Read it here so the parent process always has an up-to-date value even
-    # though subprocess variable assignments cannot propagate back to the parent.
     if [[ -f "${LAST_PLAYED_FILE}" ]]; then
         local file_from_disk
         file_from_disk=$(<"${LAST_PLAYED_FILE}")
@@ -331,7 +329,7 @@ save_stream_state() {
             LAST_LOGGED_FILE="$file_from_disk"
         fi
     fi
-    
+
     # Create JSON state
     cat > "$state_file" <<EOF
 {
@@ -341,29 +339,29 @@ save_stream_state() {
   "stream_start_time": "${STREAM_START_TIME:-}"
 }
 EOF
-    
+
     log_debug "Stream state saved to ${state_file}"
 }
 
 # Load stream state from JSON file
 load_stream_state() {
     local state_file="$STREAM_STATE_FILE"
-    
+
     if [[ ! -f "$state_file" ]]; then
         log_debug "No previous stream state found"
         return 0
     fi
-    
+
     # Parse JSON (simple grep/sed approach for basic fields)
     if [[ -r "$state_file" ]]; then
         local last_played=$(grep -o '"last_played": "[^"]*"' "$state_file" 2>/dev/null | cut -d'"' -f4 || echo "")
         local loop_count=$(grep -o '"loop_count": [0-9]*' "$state_file" 2>/dev/null | awk '{print $2}' || echo "0")
-        
+
         if [[ -n "$last_played" ]]; then
             log "INF" "Recovered last played: $(basename "$last_played")"
             LAST_LOGGED_FILE="$last_played"
         fi
-        
+
     fi
 }
 
@@ -393,6 +391,13 @@ check_dependencies() {
         log "ERR" "Missing required dependencies: ${missing[*]}"
         exit 1
     fi
+
+    # Warn (not error) if streamlink is missing and channel check is configured
+    if [[ -n "$TWITCH_CHANNEL" ]] && ! command -v streamlink &> /dev/null; then
+        log "WAR" "TWITCH_CHANNEL is set but 'streamlink' is not installed — online check disabled."
+        log "WAR" "Add 'streamlink' to your Dockerfile to enable automatic offline detection."
+        TWITCH_CHANNEL=""
+    fi
 }
 
 # ============================================================================
@@ -413,7 +418,7 @@ get_playlist_duration() {
     # Quick file count check
     local file_count
     file_count=$(grep -c "^file " "$playlist_file" 2>/dev/null || echo 0)
-    
+
     # Generate cache key based on source directory and file count
     local cache_key
     cache_key="${source_dir//[:\/ ]/_}_${file_count}"
@@ -428,7 +433,7 @@ get_playlist_duration() {
             return
         fi
     fi
-    
+
     # Cache miss - need to calculate
     log "INF" "Calculating durations for $(basename "$source_dir") (${file_count} files)..."
 
@@ -438,7 +443,7 @@ get_playlist_duration() {
     # Parse durations from playlist comments first (if available)
     local total_duration=0
     local files_with_duration=0
-    
+
     while IFS= read -r line; do
         if [[ "$line" =~ ^file\ \'([^\']+)\'\ #\ duration:\ ([0-9.]+) ]]; then
             local duration="${BASH_REMATCH[2]}"
@@ -448,11 +453,11 @@ get_playlist_duration() {
             fi
         fi
     done < "$playlist_file"
-    
+
     # If all files had durations in comments, we're done
     if [[ $files_with_duration -eq $file_count ]]; then
         local result="${total_duration} ${file_count}"
-        
+
         # Cache the result
         if [[ "$use_cache" == "true" ]]; then
             mkdir -p "$(dirname "$DURATION_CACHE")"
@@ -460,14 +465,14 @@ get_playlist_duration() {
             echo "${cache_key}:${result}" >> "${DURATION_CACHE}.tmp"
             mv "${DURATION_CACHE}.tmp" "$DURATION_CACHE" 2>/dev/null || true
         fi
-        
+
         echo "$result"
         return
     fi
-    
+
     # Fallback: Need to probe files that don't have duration comments
     log "WAR" "Some files missing duration metadata, probing with ffprobe..."
-    
+
     local result
     result=$(awk -v playlist_dir="$playlist_dir" '
         BEGIN { FS = "\x27"; total_duration = 0; file_count = 0; }
@@ -476,11 +481,9 @@ get_playlist_duration() {
             relative_path = $2;
             full_path = (relative_path ~ /^\//) ? relative_path : playlist_dir "/" relative_path;
 
-            # Use ffprobe with explicit output format to get only the duration value
             cmd = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"" full_path "\" 2>&1";
             duration = "";
             while ((cmd | getline line) > 0) {
-                # Only capture lines that are pure numbers (duration values)
                 if (line ~ /^[0-9]+(\.[0-9]+)?$/) {
                     duration = line;
                 }
@@ -516,7 +519,6 @@ get_playlist_duration() {
 # ============================================================================
 
 # Build an in-memory index of the playlist for O(1) lookups during monitoring.
-# Must be called after generate_videolist (and again after shuffle regeneration).
 build_playlist_index() {
     local playlist_file="$1"
 
@@ -553,14 +555,11 @@ build_playlist_index() {
 }
 
 # O(1) lookup for file info from the in-memory index
-# Returns: "line_num total duration" (duration may be empty)
 get_file_info_from_playlist() {
     local current_file="$1"
-    # Second argument (playlist_file) kept for API compatibility but no longer used.
 
     local index_entry="${PLAYLIST_INDEX[$current_file]:-}"
     if [[ -z "$index_entry" ]]; then
-        # Not found in index — return empty so callers behave as before
         return
     fi
 
@@ -573,7 +572,6 @@ get_file_info_from_playlist() {
 # ============================================================================
 
 # Generic function to generate a playlist file from a directory of media files.
-# Handles special characters robustly using NUL-delimited pipes.
 generate_playlist() {
     local source_dir="$1"
     local file_types="$2"
@@ -616,31 +614,29 @@ generate_playlist() {
         sort_or_shuffle_cmd=(sort -z)
     fi
 
-    # Use find -print0 with NUL-delimited read to handle special characters
-    # Write to temp file first, then move to avoid empty file overwrites
     local temp_file="${output_file}.tmp.$$"
     {
         if [[ "$media_type" == "Video" ]]; then
-        # Probe all files in parallel for speed, then sort/shuffle the results
-        local probe_tmp
-        probe_tmp=$(mktemp)
-        find "${find_args[@]}" -print0 2>/dev/null \
-            | xargs -0 -P 16 -n 1 bash -c '
-                file="$1"
-                duration=$(ffprobe -v error \
-                    -probesize 1M \
-                    -analyzeduration 0 \
-                    -show_entries format=duration \
-                    -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || echo "0")
-                [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || duration="0"
-                printf "file '\''%s'\'' # duration: %s\n" "$file" "$duration"
-            ' --  >> "$probe_tmp"
-        if [[ "${ENABLE_SHUFFLE:-false}" == "true" ]]; then
-            shuf "$probe_tmp" > "$temp_file"
-        else
-            sort "$probe_tmp" > "$temp_file"
-        fi
-        rm -f "$probe_tmp"
+            # Probe all files in parallel for speed, then sort/shuffle the results
+            local probe_tmp
+            probe_tmp=$(mktemp)
+            find "${find_args[@]}" -print0 2>/dev/null \
+                | xargs -0 -P 16 -n 1 bash -c '
+                    file="$1"
+                    duration=$(ffprobe -v error \
+                        -probesize 1M \
+                        -analyzeduration 0 \
+                        -show_entries format=duration \
+                        -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null || echo "0")
+                    [[ "$duration" =~ ^[0-9]+(\.[0-9]+)?$ ]] || duration="0"
+                    printf "file '\''%s'\'' # duration: %s\n" "$file" "$duration"
+                ' --  >> "$probe_tmp"
+            if [[ "${ENABLE_SHUFFLE:-false}" == "true" ]]; then
+                shuf "$probe_tmp" > "$temp_file"
+            else
+                sort "$probe_tmp" > "$temp_file"
+            fi
+            rm -f "$probe_tmp"
         else
             find "${find_args[@]}" -print0 2>/dev/null | "${sort_or_shuffle_cmd[@]}" | while IFS= read -r -d '' file; do
                 echo "file '$file'"
@@ -648,7 +644,6 @@ generate_playlist() {
         fi
     }
 
-    # Move temp file to final location (atomic operation)
     mv "$temp_file" "$output_file" 2>/dev/null || true
     local count
     count=$(grep -c "^file " "${output_file}" 2>/dev/null || echo 0)
@@ -715,6 +710,54 @@ generate_videolist() {
 }
 
 # ============================================================================
+# TWITCH ONLINE CHECK
+# ============================================================================
+
+# Check if the Twitch channel is live using streamlink.
+# Returns 0 if live, 1 if offline or check failed.
+check_twitch_online() {
+    local channel="${TWITCH_CHANNEL:-}"
+
+    # Skip silently if not configured or streamlink not available
+    if [[ -z "$channel" ]] || ! command -v streamlink &> /dev/null; then
+        return 0
+    fi
+
+    local result
+    # Do not use --quiet here — it suppresses the "Available streams:" line we need to grep.
+    # Redirect stderr to stdout so we capture all output including the root warning.
+    # Timeout 15s so a slow network never blocks the monitor loop.
+    result=$(timeout 15 streamlink "twitch.tv/${channel}" 2>&1 || true)
+
+    if ! echo "$result" | grep -q "Available streams:"; then
+        return 1  # offline or check failed
+    fi
+
+    # Stream is live — now check what quality is available.
+    # Extract the height from STREAM_RESOLUTION (e.g. "1280x720" -> "720")
+    local expected_height="${STREAM_RESOLUTION#*x}"
+    local streams_line
+    streams_line=$(echo "$result" | grep "Available streams:")
+
+    # Check if there are ANY video streams (anything ending in p, e.g. 720p, 1080p, 360p)
+    if ! echo "$streams_line" | grep -qE "[0-9]+p"; then
+        # Only audio_only — ffmpeg is sending audio but no video frames
+        log "ERR" "Twitch channel '${channel}' has no video stream — audio only! (${streams_line})"
+        log "ERR" "This usually means VA-API encoding has failed. Triggering restart..."
+        return 1  # treat as failure to trigger restart
+    fi
+
+    if echo "$streams_line" | grep -q "${expected_height}p"; then
+        log_debug "Twitch channel '${channel}' is LIVE at ${expected_height}p as expected."
+    else
+        log "WAR" "Twitch channel '${channel}' is LIVE but ${expected_height}p not found. Streams: ${streams_line}"
+        log "WAR" "This may indicate a VA-API encoding issue or resolution mismatch."
+    fi
+
+    return 0  # live with video — resolution mismatch is a warning only, not a restart trigger
+}
+
+# ============================================================================
 # PROGRESS MONITORING
 # ============================================================================
 
@@ -733,22 +776,27 @@ parse_progress_output() {
     echo "$current_file|$progress_percent"
 }
 
-# Function to monitor ffmpeg using the 'progress' command in the background
+# Function to monitor ffmpeg using the 'progress' command in the background.
+# Also checks Twitch online status via streamlink and kills ffmpeg if offline
+# for TWITCH_OFFLINE_THRESHOLD consecutive checks.
 monitor_ffmpeg_progress() {
     local last_logged_file=""
-    
-    # Persist last file even if we are killed (TERM/INT) or exit normally.
+    local offline_count=0
+    local stream_start
+    stream_start=$(date +%s)
+    local last_twitch_check=0
+
+    # Persist last file even if we are killed
     persist_last_played() {
         if [[ -n "$last_logged_file" ]]; then
             echo "$last_logged_file" > "${LAST_PLAYED_FILE}"
             LAST_LOGGED_FILE="$last_logged_file"
         fi
-        # Print a final newline when monitoring stops
         >&2 echo
     }
     trap persist_last_played EXIT TERM INT
 
-    # Give ffmpeg a moment to start and open a file before we start monitoring
+    # Give ffmpeg a moment to start
     sleep 2
 
     # Pre-calculate file extension regex once
@@ -759,51 +807,77 @@ monitor_ffmpeg_progress() {
     local file_ext_regex
     file_ext_regex="$(printf '%s\n' "$sanitized_types" | paste -sd'|' -)"
 
-    # Monitor loop with reduced overhead
     while kill -0 "$FFMPEG_PID" 2>/dev/null; do
-        # Take a snapshot; don't let a transient error kill the loop
+        # --- File progress monitoring ---
         local output
         output="$(progress -c ffmpeg -q 2>/dev/null || true)"
-        if [[ -z "$output" ]]; then
-            sleep 0.5
-            continue
+        if [[ -n "$output" ]]; then
+            local result
+            result=$(parse_progress_output "$output" "$file_ext_regex")
+            local current_file="${result%%|*}"
+            local progress_percent="${result##*|}"
+
+            if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
+                local file_info
+                file_info=$(get_file_info_from_playlist "$current_file")
+
+                if [[ -n "$file_info" ]]; then
+                    read -r line_num total_files duration <<< "$file_info"
+                    local file_counter_str="|${line_num}/${total_files}]"
+                    local file_duration=""
+
+                    if [[ -n "$duration" && "$duration" != "0" ]]; then
+                        file_duration=$(format_duration "$duration")
+                    fi
+
+                    if [[ -n "$file_duration" ]]; then
+                        log "VID" "▶ [${LOOP_COUNT}${file_counter_str} $(basename "$current_file") (${progress_percent:-0.0%}) ⏱ ${file_duration}"
+                    else
+                        log "VID" "▶ [${LOOP_COUNT}${file_counter_str} $(basename "$current_file") (${progress_percent:-0.0%})"
+                    fi
+                else
+                    log "VID" "▶ [${LOOP_COUNT}] $(basename "$current_file") (${progress_percent:-0.0%})"
+                fi
+
+                last_logged_file="$current_file"
+                echo "$last_logged_file" > "${LAST_PLAYED_FILE}"
+                LAST_LOGGED_FILE="$last_logged_file"
+
+            elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
+                log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
+            fi
         fi
 
-        # Parse output using helper
-        local result
-        result=$(parse_progress_output "$output" "$file_ext_regex")
-        local current_file="${result%%|*}"
-        local progress_percent="${result##*|}"
+        # --- Twitch online check ---
+        if [[ -n "${TWITCH_CHANNEL:-}" ]] && command -v streamlink &> /dev/null; then
+            local now
+            now=$(date +%s)
+            local elapsed=$(( now - stream_start ))
 
-        if [[ -n "$current_file" && "$current_file" != "$last_logged_file" ]]; then
-            # O(1) index lookup — no awk scan of the full playlist file
-            local file_info
-            file_info=$(get_file_info_from_playlist "$current_file")
-            
-            if [[ -n "$file_info" ]]; then
-                read -r line_num total_files duration <<< "$file_info"
-                local file_counter_str="|${line_num}/${total_files}]"
-                local file_duration=""
-                
-                if [[ -n "$duration" && "$duration" != "0" ]]; then
-                    file_duration=$(format_duration "$duration")
-                fi
-                
-                if [[ -n "$file_duration" ]]; then
-                    log "VID" "▶ [${LOOP_COUNT}${file_counter_str} $(basename "$current_file") (${progress_percent:-0.0%}) ⏱ ${file_duration}"
+            # Only start checking after the initial delay (HLS takes ~20s to appear)
+            if (( elapsed >= TWITCH_CHECK_INITIAL_DELAY )) && (( now - last_twitch_check >= TWITCH_CHECK_INTERVAL )); then
+                last_twitch_check=$now
+
+                if check_twitch_online; then
+                    if [[ $offline_count -gt 0 ]]; then
+                        log "INF" "Twitch channel '${TWITCH_CHANNEL}' is back LIVE (was offline for ${offline_count} check(s))."
+                    fi
+                    offline_count=0
                 else
-                    log "VID" "▶ [${LOOP_COUNT}${file_counter_str} $(basename "$current_file") (${progress_percent:-0.0%})"
+                    offline_count=$(( offline_count + 1 ))
+                    log "WAR" "Twitch channel '${TWITCH_CHANNEL}' appears OFFLINE (${offline_count}/${TWITCH_OFFLINE_THRESHOLD} checks)."
+
+                    if (( offline_count >= TWITCH_OFFLINE_THRESHOLD )); then
+                        log "ERR" "Channel offline for ${offline_count} consecutive checks. Killing ffmpeg to trigger restart..."
+                        # Kill ffmpeg — the main loop's retry/loop logic will restart it
+                        kill -TERM "$FFMPEG_PID" 2>/dev/null || true
+                        # Reset counter so the next run starts fresh
+                        offline_count=0
+                        # Exit monitor loop; ffmpeg is gone
+                        break
+                    fi
                 fi
-            else
-                log "VID" "▶ [${LOOP_COUNT}] $(basename "$current_file") (${progress_percent:-0.0%})"
             fi
-            
-            last_logged_file="$current_file"
-            echo "$last_logged_file" > "${LAST_PLAYED_FILE}"
-            LAST_LOGGED_FILE="$last_logged_file"
-            
-        elif [[ "${ENABLE_PROGRESS_UPDATES}" == "true" && -n "$current_file" && -n "$progress_percent" ]]; then
-            log "VID" "Progress: $(basename "$current_file") (${progress_percent})" "-n"
         fi
 
         sleep 2
@@ -942,7 +1016,7 @@ detect_network_error() {
 # FFMPEG STREAM MANAGEMENT
 # ============================================================================
 
-# Helper to format command arguments for logging (adds quotes if needed)
+# Helper to format command arguments for logging
 format_cmd_for_log() {
     local cmd_str=""
     for arg in "$@"; do
@@ -955,7 +1029,7 @@ format_cmd_for_log() {
     echo "$cmd_str"
 }
 
-# Function to start the ffmpeg stream with dynamically constructed arguments
+# Function to start the ffmpeg stream
 start_ffmpeg_stream() {
     log "VID" "Preparing to start FFmpeg stream..."
 
@@ -1040,7 +1114,7 @@ start_ffmpeg_stream() {
             sleep 1
         done
         wait "$monitor_pid" 2>/dev/null || true
-        
+
         # Read the last played file from the temp file
         local last_played_file=""
         if [[ -f "${LAST_PLAYED_FILE}" ]]; then
@@ -1053,7 +1127,7 @@ start_ffmpeg_stream() {
             # O(1) index lookup for post-stream reporting
             local file_info
             file_info=$(get_file_info_from_playlist "$last_played_file")
-            
+
             if [[ -n "$file_info" ]]; then
                 read -r line_num total_files duration <<< "$file_info"
                 log "ERR" "Last Played: $(basename "$last_played_file") (File ${line_num}/${total_files})"
@@ -1088,14 +1162,14 @@ start_ffmpeg_stream() {
 # Gather system information in separate function
 gather_system_info() {
     local -A sys_info
-    
+
     # Linux Distribution
     if [[ -f /etc/os-release ]]; then
         sys_info[linux]=$(source /etc/os-release 2>/dev/null && echo "${NAME} ${VERSION_ID:-}" || echo "Linux (unknown)")
     else
         sys_info[linux]="Linux (unknown)"
     fi
-    
+
     # CPU Detection
     if [[ -f /proc/cpuinfo ]]; then
         local cpu_model=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^[ \t]*//' || echo "")
@@ -1110,13 +1184,15 @@ gather_system_info() {
     else
         sys_info[cpu]="unknown"
     fi
-    
+
     # Run slow external commands in parallel using temp files
-    local tmp_vainfo tmp_ffmpeg tmp_ffprobe tmp_progress
+    local tmp_vainfo tmp_ffmpeg tmp_ffprobe tmp_progress tmp_streamlink
     tmp_vainfo=$(mktemp)
     tmp_ffmpeg=$(mktemp)
     tmp_ffprobe=$(mktemp)
     tmp_progress=$(mktemp)
+    tmp_streamlink=$(mktemp)
+
 
     # Launch all in background simultaneously
     # GPU Detection (VA-API)
@@ -1131,9 +1207,11 @@ gather_system_info() {
     # Progress command version
     { progress -v 2>/dev/null | head -n1 || true; } > "$tmp_progress" &
     local pid_progress=$!
+    # Streamlink command version
+    { streamlink --version 2>/dev/null | head -n1 || true; } > "$tmp_streamlink" &
+    local pid_streamlink=$!
 
-    # Wait for all to finish
-    wait $pid_vainfo $pid_ffmpeg $pid_ffprobe $pid_progress
+    wait $pid_vainfo $pid_ffmpeg $pid_ffprobe $pid_progress $pid_streamlink
 
     # Parse vainfo output
     if [[ -e "$VAAPI_DEVICE" ]] && command -v vainfo &> /dev/null; then
@@ -1156,14 +1234,15 @@ gather_system_info() {
     sys_info[ffmpeg]=$(awk '{print $3}' "$tmp_ffmpeg" 2>/dev/null || echo "unknown")
     sys_info[ffprobe]=$(awk '{print $3}' "$tmp_ffprobe" 2>/dev/null || echo "unknown")
     sys_info[progress]=$(awk '{print $3}' "$tmp_progress" 2>/dev/null || echo "unknown")
+    sys_info[streamlink]=$(awk '{print $2}' "$tmp_streamlink" 2>/dev/null || echo "not installed")
 
-    [[ -z "${sys_info[ffmpeg]}" ]]   && sys_info[ffmpeg]="not installed"
-    [[ -z "${sys_info[ffprobe]}" ]]  && sys_info[ffprobe]="not installed"
-    [[ -z "${sys_info[progress]}" ]] && sys_info[progress]="not installed"
+    [[ -z "${sys_info[ffmpeg]}" ]]     && sys_info[ffmpeg]="not installed"
+    [[ -z "${sys_info[ffprobe]}" ]]    && sys_info[ffprobe]="not installed"
+    [[ -z "${sys_info[progress]}" ]]   && sys_info[progress]="not installed"
+    [[ -z "${sys_info[streamlink]}" ]] && sys_info[streamlink]="not installed"
 
-    # Cleanup temp files
-    rm -f "$tmp_vainfo" "$tmp_ffmpeg" "$tmp_ffprobe" "$tmp_progress"
-    
+    rm -f "$tmp_vainfo" "$tmp_ffmpeg" "$tmp_ffprobe" "$tmp_progress" "$tmp_streamlink"
+
     # Return associative array as serialized string
     for key in "${!sys_info[@]}"; do
         echo "${key}=${sys_info[$key]}"
@@ -1177,12 +1256,12 @@ gather_system_info() {
 # Display configuration in a cleaner function
 display_configuration() {
     local -A sys_info
-    
+
     # Parse system info
     while IFS='=' read -r key value; do
         sys_info[$key]="$value"
     done < <(gather_system_info)
-    
+
     log "WAR" "=== STREAM SCRIPT START ==="
 
     # Helper to calculate max length from a list of strings
@@ -1199,12 +1278,12 @@ display_configuration() {
     local v_buf=": $BUFSIZE"
     local v_hw=": $USE_HWACCEL"
     local v_dev=": $VAAPI_DEVICE"
-    
+
     local v_abit=": $AUDIO_BITRATE"
     local v_music=": $ENABLE_MUSIC"
     local v_loop=": $ENABLE_LOOP"
     local v_shuf=": ${ENABLE_SHUFFLE:-false}"
-    
+
     local v_linux=": ${sys_info[linux]}"
     local v_cpu=": ${sys_info[cpu]}"
     local v_vaapi=": ${sys_info[vaapi]}"
@@ -1212,7 +1291,11 @@ display_configuration() {
     local v_ffmpeg=": ${sys_info[ffmpeg]}"
     local v_ffprobe=": ${sys_info[ffprobe]}"
     local v_progress=": ${sys_info[progress]}"
-    
+    local v_streamlink=": ${sys_info[streamlink]}"
+    local v_channel=": ${TWITCH_CHANNEL:-disabled}"
+    local v_chk_delay=": ${TWITCH_CHECK_INITIAL_DELAY}s initial / ${TWITCH_CHECK_INTERVAL}s interval"
+    local v_chk_thresh=": ${TWITCH_OFFLINE_THRESHOLD} consecutive offline checks"
+
     # Calculate dynamic widths
     local max_l_val_len
     if [[ "$USE_HWACCEL" == "true" ]]; then
@@ -1230,7 +1313,7 @@ display_configuration() {
 
     # Ensure FULL_WIDTH is enough for system info
     local max_sys_len
-    max_sys_len=$(get_max_len "$v_linux" "$v_cpu" "$v_vaapi" "$v_driver" "$v_ffmpeg" "$v_ffprobe" "$v_progress")
+    max_sys_len=$(get_max_len "$v_linux" "$v_cpu" "$v_vaapi" "$v_driver" "$v_ffmpeg" "$v_ffprobe" "$v_progress" "$v_streamlink" "$v_channel" "$v_chk_delay" "$v_chk_thresh")
     local min_full_width=$((max_sys_len + 14))
     if [[ $((L_WIDTH + R_WIDTH + 3)) -lt $min_full_width ]]; then
         local diff=$((min_full_width - (L_WIDTH + R_WIDTH + 3)))
@@ -1239,13 +1322,13 @@ display_configuration() {
     fi
 
     local FULL_WIDTH=$((L_WIDTH + R_WIDTH + 3))
-    
+
     # Unicode box characters
     local V="│"
     local H="─"
     local HH="═"
     local TT="╤"
-    
+
     # Helper to simplify printing a 2-column row
     print_2col() {
         local l_text="$1"
@@ -1279,6 +1362,7 @@ display_configuration() {
     local val_ffmpeg=$(pad_str "$v_ffmpeg" $((FULL_WIDTH - 14)))
     local val_ffprobe=$(pad_str "$v_ffprobe" $((FULL_WIDTH - 14)))
     local val_progress=$(pad_str "$v_progress" $((FULL_WIDTH - 14)))
+    local val_streamlink=$(pad_str "$v_streamlink" $((FULL_WIDTH - 14)))
     log "SET" "$V $(printf "%-13s %s" "Linux" "$val_linux") $V"
     log "SET" "$V $(printf "%-13s %s" "CPU" "$val_cpu") $V"
     log "SET" "$V $(printf "%-13s %s" "VA-API" "$val_vaapi") $V"
@@ -1286,6 +1370,16 @@ display_configuration() {
     log "SET" "$V $(printf "%-13s %s" "ffmpeg" "$val_ffmpeg") $V"
     log "SET" "$V $(printf "%-13s %s" "ffprobe" "$val_ffprobe") $V"
     log "SET" "$V $(printf "%-13s %s" "progress" "$val_progress") $V"
+    log "SET" "$V $(printf "%-13s %s" "streamlink" "$val_streamlink") $V"
+
+    # Twitch online check config
+    log "SET" "╞$(draw_line 3 "$HH") Twitch Online Check $(draw_line $((FULL_WIDTH - 22)) "$HH")╡"
+    local val_channel=$(pad_str "$v_channel" $((FULL_WIDTH - 14)))
+    local val_chk_delay=$(pad_str "$v_chk_delay" $((FULL_WIDTH - 14)))
+    local val_chk_thresh=$(pad_str "$v_chk_thresh" $((FULL_WIDTH - 14)))
+    log "SET" "$V $(printf "%-13s %s" "Channel" "$val_channel") $V"
+    log "SET" "$V $(printf "%-13s %s" "Timing" "$val_chk_delay") $V"
+    log "SET" "$V $(printf "%-13s %s" "Restart if" "$val_chk_thresh") $V"
 
     # Draw Video/Audio Configuration
     local header_l="╞$(draw_line 3 "$HH") Video Configuration $(draw_line $((L_WIDTH - 22)) "$HH")"

@@ -35,6 +35,7 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     bash \
     progress \
     vainfo \
+    streamlink \
     # Runtime libs for VA-API hardware acceleration
     libva2 \
     libva-drm2 \

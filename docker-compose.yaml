@@ -27,11 +27,18 @@ services:
       - VIDEO_DIR=/videos
       - VIDEO_FILE_TYPES="mp4"
 
+      # Twitch channel name to check for live status. This is required for the script to function.
+      - TWITCH_CHANNEL=egon_p
+      # Optional tuning:
+      - TWITCH_CHECK_INITIAL_DELAY=60
+      - TWITCH_CHECK_INTERVAL=120
+      - TWITCH_OFFLINE_THRESHOLD=3
+
       # --- Optional Stream Quality Settings ---
       - ENABLE_HW_ACCEL=true
       - VAAPI_DEVICE=/dev/dri/renderD128
       # Uncomment and adjust these to change stream quality.
-      - USE_VIDEO_FILTER=true
+      - USE_VIDEO_FILTER=false
       - STREAM_RESOLUTION=1280x720
       - STREAM_FRAMERATE=30
       - VIDEO_BITRATE=2500k
@@ -66,15 +73,16 @@ services:
       # Uncomment to save WARNING and ERROR level script messages to a log file.
       # This is useful for reviewing issues without having to parse the main container log.
       - ENABLE_SCRIPT_LOG_FILE=true
-      # Show all debug messages
-      - LOG_LEVEL=DBG
+      # Set the minimum log level to INF, WAR, ERR, DBG.
+      - LOG_LEVEL=INF
       # Optional: customize log file path
       # - SCRIPT_LOG_FILE=/data/script_warnings_errors.log
 
       # --- Optional Ingest Server ---
       # For best results, choose a server close to you from https://help.twitch.tv/s/twitch-ingest-recommendation
-      # Europe: Finland, Helsinki
-      - TWITCH_INGEST_URL=rtmp://hel03.contribute.live-video.net/app/
+      # Europe: Finland, Helsinki = rtmp://hel03.contribute.live-video.net/app/
+      # Generic: rtmp://live.twitch.tv/app
+      - TWITCH_INGEST_URL=rtmp://live.twitch.tv/app
       - TZ=Europe/Tallinn
 
     # --- Group Permissions (for Hardware Acceleration) ---
