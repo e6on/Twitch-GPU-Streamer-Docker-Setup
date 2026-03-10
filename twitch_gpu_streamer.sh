@@ -852,7 +852,8 @@ monitor_ffmpeg_progress() {
         if [[ -n "${TWITCH_CHANNEL:-}" ]] && command -v streamlink &> /dev/null; then
             local now
             now=$(date +%s)
-            local elapsed=$(( now - stream_start ))
+            local elapsed
+            elapsed=$(( now - stream_start ))
 
             # Only start checking after the initial delay (HLS takes ~20s to appear)
             if (( elapsed >= TWITCH_CHECK_INITIAL_DELAY )) && (( now - last_twitch_check >= TWITCH_CHECK_INTERVAL )); then
