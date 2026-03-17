@@ -742,7 +742,8 @@ check_twitch_online() {
     # Check if there are ANY video streams (anything ending in p, e.g. 720p, 1080p, 360p)
     if ! echo "$streams_line" | grep -qE "[0-9]+p"; then
         # Only audio_only — ffmpeg is sending audio but no video frames
-        log "ERR" "Twitch channel '${channel}' has no video stream — audio only! (${streams_line})"
+        log "ERR" "Twitch channel '${channel}' has no video stream!"
+        log "ERR" "${streams_line}"
         log "ERR" "This usually means VA-API encoding has failed. Triggering restart..."
         return 1  # treat as failure to trigger restart
     fi
@@ -750,11 +751,11 @@ check_twitch_online() {
     if echo "$streams_line" | grep -q "${expected_height}p"; then
         log_debug "Twitch channel '${channel}' is LIVE at ${expected_height}p as expected."
     else
-        log "WAR" "Twitch channel '${channel}' is LIVE but ${expected_height}p not found. Streams: ${streams_line}"
-        log "WAR" "This may indicate a VA-API encoding issue or resolution mismatch."
+        log "ERR" "Twitch channel '${channel}' is LIVE but ${expected_height}p not found."
+        log "ERR" "${streams_line}"
+        log "ERR" "This may indicate a VA-API encoding issue. Triggering restart..."
+        return 1  # treat resolution mismatch as failure to trigger restart
     fi
-
-    return 0  # live with video — resolution mismatch is a warning only, not a restart trigger
 }
 
 # ============================================================================
