@@ -82,6 +82,38 @@ All configuration is done through environment variables in the `.env` file or `d
 
 **Tip:** When troubleshooting stream drops or unexpected exits, temporarily enable `ENABLE_FFMPEG_LOG_FILE=true` with `FFMPEG_LOG_LEVEL=warning`. This logs only actual errors without creating huge log files.
 
+### Twitch Channel Monitoring
+
+When `TWITCH_CHANNEL` is set, the script periodically checks via streamlink whether your channel is actually live on Twitch. If it detects the stream has dropped (e.g. RTMP got through but Twitch rejected it), it restarts FFmpeg automatically.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TWITCH_CHANNEL` | *(disabled)* | Your Twitch channel name (e.g. `egon_p`). Enables live monitoring. |
+| `TWITCH_OAUTH_TOKEN` | *(none)* | Twitch OAuth token for streamlink. See below — strongly recommended. |
+| `TWITCH_CHECK_INTERVAL` | `60` | Seconds between channel online checks |
+| `TWITCH_CHECK_INITIAL_DELAY` | `30` | Seconds to wait after stream start before first check |
+| `TWITCH_OFFLINE_THRESHOLD` | `3` | Consecutive offline checks before triggering a restart |
+
+#### Getting a Twitch OAuth token
+
+Twitch requires a client-integrity token for API calls. Without an OAuth token, streamlink tries to obtain one by launching a headless Chromium browser — which adds ~300 MB to the image. Providing an OAuth token bypasses this entirely and keeps the image lean.
+
+1. Install streamlink locally: `pip install streamlink`
+2. Run the login flow:
+   ```bash
+   streamlink --twitch-login
+   ```
+3. Follow the prompts — your token will be saved locally. To retrieve it:
+   ```bash
+   # On Linux/macOS
+   cat ~/.local/share/streamlink/plugins/twitch.json
+   # or check: ~/.config/streamlink/plugins/twitch.json
+   ```
+4. Copy the token value into your `.env`:
+   ```
+   TWITCH_OAUTH_TOKEN="your_token_here"
+   ```
+
 ### Advanced Settings
 
 | Variable | Default | Description |

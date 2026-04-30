@@ -724,10 +724,13 @@ check_twitch_online() {
     fi
 
     local result
+    local sl_args=()
+    if [[ -n "${TWITCH_OAUTH_TOKEN:-}" ]]; then
+        sl_args+=(--twitch-api-header "Authorization=OAuth ${TWITCH_OAUTH_TOKEN}")
+    fi
     # Do not use --quiet here — it suppresses the "Available streams:" line we need to grep.
     # Redirect stderr to stdout so we capture all output including the root warning.
-    # Timeout 30s — Chromium browser launch for integrity token acquisition adds significant latency.
-    result=$(timeout 30 streamlink "twitch.tv/${channel}" 2>&1 || true)
+    result=$(timeout 15 streamlink "${sl_args[@]}" "twitch.tv/${channel}" 2>&1 || true)
 
     if ! echo "$result" | grep -q "Available streams:"; then
         return 1  # offline or check failed
@@ -1188,13 +1191,12 @@ gather_system_info() {
     fi
 
     # Run slow external commands in parallel using temp files
-    local tmp_vainfo tmp_ffmpeg tmp_ffprobe tmp_progress tmp_streamlink tmp_chromium
+    local tmp_vainfo tmp_ffmpeg tmp_ffprobe tmp_progress tmp_streamlink
     tmp_vainfo=$(mktemp)
     tmp_ffmpeg=$(mktemp)
     tmp_ffprobe=$(mktemp)
     tmp_progress=$(mktemp)
     tmp_streamlink=$(mktemp)
-    tmp_chromium=$(mktemp)
 
 
     # Launch all in background simultaneously
@@ -1213,11 +1215,8 @@ gather_system_info() {
     # Streamlink command version
     { streamlink --version 2>/dev/null | head -n1 || true; } > "$tmp_streamlink" &
     local pid_streamlink=$!
-    # Chromium version
-    { chromium --version 2>/dev/null | head -n1 || true; } > "$tmp_chromium" &
-    local pid_chromium=$!
 
-    wait $pid_vainfo $pid_ffmpeg $pid_ffprobe $pid_progress $pid_streamlink $pid_chromium
+    wait $pid_vainfo $pid_ffmpeg $pid_ffprobe $pid_progress $pid_streamlink
 
     # Parse vainfo output
     if [[ -e "$VAAPI_DEVICE" ]] && command -v vainfo &> /dev/null; then
@@ -1241,15 +1240,13 @@ gather_system_info() {
     sys_info[ffprobe]=$(awk '{print $3}' "$tmp_ffprobe" 2>/dev/null || echo "unknown")
     sys_info[progress]=$(awk '{print $3}' "$tmp_progress" 2>/dev/null || echo "unknown")
     sys_info[streamlink]=$(awk '{print $2}' "$tmp_streamlink" 2>/dev/null || echo "not installed")
-    sys_info[chromium]=$(awk '{print $2}' "$tmp_chromium" 2>/dev/null || echo "not installed")
 
     [[ -z "${sys_info[ffmpeg]}" ]]     && sys_info[ffmpeg]="not installed"
     [[ -z "${sys_info[ffprobe]}" ]]    && sys_info[ffprobe]="not installed"
     [[ -z "${sys_info[progress]}" ]]   && sys_info[progress]="not installed"
     [[ -z "${sys_info[streamlink]}" ]] && sys_info[streamlink]="not installed"
-    [[ -z "${sys_info[chromium]}" ]]   && sys_info[chromium]="not installed"
 
-    rm -f "$tmp_vainfo" "$tmp_ffmpeg" "$tmp_ffprobe" "$tmp_progress" "$tmp_streamlink" "$tmp_chromium"
+    rm -f "$tmp_vainfo" "$tmp_ffmpeg" "$tmp_ffprobe" "$tmp_progress" "$tmp_streamlink"
 
     # Return associative array as serialized string
     for key in "${!sys_info[@]}"; do
@@ -1300,7 +1297,6 @@ display_configuration() {
     local v_ffprobe=": ${sys_info[ffprobe]}"
     local v_progress=": ${sys_info[progress]}"
     local v_streamlink=": ${sys_info[streamlink]}"
-    local v_chromium=": ${sys_info[chromium]}"
     local v_channel=": ${TWITCH_CHANNEL:-disabled}"
     local v_chk_delay=": ${TWITCH_CHECK_INITIAL_DELAY}s initial / ${TWITCH_CHECK_INTERVAL}s interval"
     local v_chk_thresh=": ${TWITCH_OFFLINE_THRESHOLD} consecutive offline checks"
@@ -1322,7 +1318,7 @@ display_configuration() {
 
     # Ensure FULL_WIDTH is enough for system info
     local max_sys_len
-    max_sys_len=$(get_max_len "$v_linux" "$v_cpu" "$v_vaapi" "$v_driver" "$v_ffmpeg" "$v_ffprobe" "$v_progress" "$v_streamlink" "$v_chromium" "$v_channel" "$v_chk_delay" "$v_chk_thresh")
+    max_sys_len=$(get_max_len "$v_linux" "$v_cpu" "$v_vaapi" "$v_driver" "$v_ffmpeg" "$v_ffprobe" "$v_progress" "$v_streamlink" "$v_channel" "$v_chk_delay" "$v_chk_thresh")
     local min_full_width=$((max_sys_len + 14))
     if [[ $((L_WIDTH + R_WIDTH + 3)) -lt $min_full_width ]]; then
         local diff=$((min_full_width - (L_WIDTH + R_WIDTH + 3)))
@@ -1372,7 +1368,6 @@ display_configuration() {
     local val_ffprobe=$(pad_str "$v_ffprobe" $((FULL_WIDTH - 14)))
     local val_progress=$(pad_str "$v_progress" $((FULL_WIDTH - 14)))
     local val_streamlink=$(pad_str "$v_streamlink" $((FULL_WIDTH - 14)))
-    local val_chromium=$(pad_str "$v_chromium" $((FULL_WIDTH - 14)))
     log "SET" "$V $(printf "%-13s %s" "Linux" "$val_linux") $V"
     log "SET" "$V $(printf "%-13s %s" "CPU" "$val_cpu") $V"
     log "SET" "$V $(printf "%-13s %s" "VA-API" "$val_vaapi") $V"
@@ -1381,7 +1376,6 @@ display_configuration() {
     log "SET" "$V $(printf "%-13s %s" "ffprobe" "$val_ffprobe") $V"
     log "SET" "$V $(printf "%-13s %s" "progress" "$val_progress") $V"
     log "SET" "$V $(printf "%-13s %s" "streamlink" "$val_streamlink") $V"
-    log "SET" "$V $(printf "%-13s %s" "chromium" "$val_chromium") $V"
 
     # Twitch online check config
     log "SET" "╞$(draw_line 3 "$HH") Twitch Online Check $(draw_line $((FULL_WIDTH - 22)) "$HH")╡"

@@ -1,29 +1,28 @@
 # --- Build Stage ---
-# This stage is only used to extract the ffmpeg binary from its archive.
-# Its contents will be discarded and will not be part of the final image.
+# Extracts ffmpeg and installs the latest streamlink into a virtualenv.
+# Nothing from this stage bleeds into the final image except what is
+# explicitly copied.
 FROM debian:trixie-slim AS builder
 
-# Install the extraction tool
 RUN apt-get update && \
     apt-get dist-upgrade -y && \
-    apt-get install -y --no-install-recommends xz-utils
+    apt-get install -y --no-install-recommends xz-utils python3 python3-venv
 
 # Copy and extract the ffmpeg archive
 COPY ffmpeg-n8.0.1-64-g15504610b0-linux64-gpl-8.0.tar.xz /tmp/
 RUN tar -xf /tmp/ffmpeg-n8.0.1-64-g15504610b0-linux64-gpl-8.0.tar.xz -C /usr/local --strip-components=1
-#COPY ffmpeg-6.1.2-linux-amd64.tar.xz /tmp/
-#RUN tar -xf /tmp/ffmpeg-6.1.2-linux-amd64.tar.xz -C /usr/local --strip-components=1
-#COPY ffmpeg-7.0.2-linux-amd64.tar.xz /tmp/
-#RUN tar -xf /tmp/ffmpeg-7.0.2-linux-amd64.tar.xz -C /usr/local --strip-components=1
+
+# Install latest streamlink into a virtualenv.
+# Using a venv avoids Debian's non-standard pip --prefix layout and keeps
+# pip out of the final image entirely.
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir streamlink
 
 # --- Final Stage ---
-# This is the final, optimized image that will be used.
 FROM debian:trixie-slim
 
-# Set shell to bash and ensure commands exit on error.
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
-# Set non-interactive frontend for package installation.
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Europe/Tallinn
 
@@ -31,12 +30,11 @@ ENV TZ=Europe/Tallinn
 RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-    # Bash is used by the entrypoint script
     bash \
     progress \
     vainfo \
-    python3-pip \
-    chromium \
+    # Python runtime for streamlink (no pip — installed via venv in builder stage)
+    python3 \
     # Runtime libs for VA-API hardware acceleration
     libva2 \
     libva-drm2 \
@@ -48,24 +46,24 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     ca-certificates && \
     # Set timezone
     ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    # Clean up apt caches
     apt-get autoremove -y && \
     apt-get autoclean && \
-    rm -rf /var/lib/apt/lists/* && \
-    # Install latest streamlink via pip (apt package is often outdated)
-    pip install --no-cache-dir --break-system-packages streamlink
+    rm -rf /var/lib/apt/lists/*
 
 # Copy the extracted ffmpeg binaries from the build stage.
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
 COPY --from=builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
 
+# Copy the streamlink virtualenv from the build stage.
+# The venv's bin/python3 is a symlink to /usr/bin/python3 which exists in
+# the final image, so the venv is fully self-contained here.
+COPY --from=builder /opt/venv /opt/venv
+RUN ln -s /opt/venv/bin/streamlink /usr/local/bin/streamlink
+
 # Copy scripts into the container
 COPY twitch_gpu_streamer.sh /usr/local/bin/twitch_gpu_streamer.sh
-
-# Set execute permissions for the scripts
 RUN chmod +x /usr/local/bin/twitch_gpu_streamer.sh
 
-# Add metadata labels
 LABEL org.opencontainers.image.title="Twitch GPU Streamer"
 LABEL org.opencontainers.image.description="Docker container for streaming video to Twitch with VA-API GPU acceleration"
 LABEL org.opencontainers.image.version="1.0"
@@ -74,5 +72,4 @@ LABEL org.opencontainers.image.url="https://github.com/e6on/Twitch-GPU-Streamer-
 LABEL org.opencontainers.image.source="https://github.com/e6on/Twitch-GPU-Streamer-Docker-Setup"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Set the entrypoint to run the streaming script explicitly with bash to avoid exec format errors
 ENTRYPOINT ["/bin/bash", "/usr/local/bin/twitch_gpu_streamer.sh"]
