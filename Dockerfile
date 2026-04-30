@@ -35,7 +35,8 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     bash \
     progress \
     vainfo \
-    streamlink \
+    python3-pip \
+    chromium \
     # Runtime libs for VA-API hardware acceleration
     libva2 \
     libva-drm2 \
@@ -50,7 +51,9 @@ RUN sed -i 's/ main/ main contrib non-free non-free-firmware/g' /etc/apt/sources
     # Clean up apt caches
     apt-get autoremove -y && \
     apt-get autoclean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    # Install latest streamlink via pip (apt package is often outdated)
+    pip install --no-cache-dir --break-system-packages streamlink
 
 # Copy the extracted ffmpeg binaries from the build stage.
 COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
